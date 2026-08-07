@@ -1,7 +1,9 @@
 node_modules/
 dist/
 out/
+artifacts/
 *.vsix
+*.exe
 *.log
 .DS_Store
 .vscode-test/

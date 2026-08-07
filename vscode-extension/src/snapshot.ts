@@ -1,9 +1,32 @@
+import path from "node:path";
 import * as vscode from "vscode";
 import type { DiagnosticSnapshot, EditorSnapshot, PositionSnapshot } from "./protocol.js";
 
-const MAX_BUFFER_CHARS = 1_000_000;
-const MAX_SELECTION_CHARS = 200_000;
+const MAX_BUFFER_BYTES = 1024 * 1024;
+const MAX_SELECTION_BYTES = 200 * 1024;
 const MAX_DIAGNOSTICS = 500;
+const MAX_DIAGNOSTIC_MESSAGE_BYTES = 4 * 1024;
+const MAX_DIAGNOSTIC_SOURCE_BYTES = 256;
+const MAX_DIAGNOSTIC_CODE_BYTES = 512;
+
+function truncateUtf8(value: string, maxBytes: number): { text: string; truncated: boolean } {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return { text: value, truncated: false };
+
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (Buffer.byteLength(value.slice(0, mid), "utf8") <= maxBytes) low = mid;
+    else high = mid - 1;
+  }
+
+  let end = low;
+  if (end > 0) {
+    const last = value.charCodeAt(end - 1);
+    if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  }
+  return { text: value.slice(0, end), truncated: true };
+}
 
 function position(value: vscode.Position): PositionSnapshot {
   return { line: value.line, character: value.character };
@@ -24,31 +47,38 @@ function severity(value: vscode.DiagnosticSeverity): DiagnosticSnapshot["severit
 
 function diagnosticCode(value: vscode.Diagnostic["code"]): string | number | undefined {
   if (value === undefined) return undefined;
-  if (typeof value === "string" || typeof value === "number") return value;
-  return typeof value.value === "string" || typeof value.value === "number" ? value.value : String(value.value);
+  if (typeof value === "number") return value;
+  if (typeof value === "string") return truncateUtf8(value, MAX_DIAGNOSTIC_CODE_BYTES).text;
+  const code = value.value;
+  if (typeof code === "number") return code;
+  return truncateUtf8(String(code), MAX_DIAGNOSTIC_CODE_BYTES).text;
+}
+
+function isInsideWorkspace(file: string, workspaceFolders: string[]): boolean {
+  const target = path.resolve(file);
+  return workspaceFolders.some((root) => {
+    const relative = path.relative(path.resolve(root), target);
+    return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  });
 }
 
 function collectDiagnostics(): { diagnostics: DiagnosticSnapshot[]; truncated: boolean } {
   const workspaceFolders = vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [];
   const diagnostics: DiagnosticSnapshot[] = [];
 
-  const belongsToWorkspace = (file: string): boolean => {
-    if (workspaceFolders.length === 0) return false;
-    const normalized = process.platform === "win32" ? file.toLowerCase() : file;
-    return workspaceFolders.some((root) => {
-      const candidate = process.platform === "win32" ? root.toLowerCase() : root;
-      return normalized === candidate || normalized.startsWith(`${candidate}\\`) || normalized.startsWith(`${candidate}/`);
-    });
-  };
-
   for (const [uri, fileDiagnostics] of vscode.languages.getDiagnostics()) {
-    if (uri.scheme !== "file" || !belongsToWorkspace(uri.fsPath)) continue;
+    if (uri.scheme !== "file" || !isInsideWorkspace(uri.fsPath, workspaceFolders)) continue;
     for (const item of fileDiagnostics) {
+      const message = truncateUtf8(item.message, MAX_DIAGNOSTIC_MESSAGE_BYTES).text;
+      const source = item.source
+        ? truncateUtf8(item.source, MAX_DIAGNOSTIC_SOURCE_BYTES).text
+        : undefined;
+
       diagnostics.push({
         file: uri.fsPath,
-        message: item.message,
+        message,
         severity: severity(item.severity),
-        source: item.source,
+        source,
         code: diagnosticCode(item.code),
         range: { start: position(item.range.start), end: position(item.range.end) },
       });
@@ -80,8 +110,8 @@ export function captureEditorSnapshot(): EditorSnapshot {
     };
   }
 
-  const fullContent = editor.document.getText();
-  const selectedText = editor.document.getText(editor.selection);
+  const content = truncateUtf8(editor.document.getText(), MAX_BUFFER_BYTES);
+  const selectionText = truncateUtf8(editor.document.getText(editor.selection), MAX_SELECTION_BYTES);
 
   return {
     type: "editor_snapshot",
@@ -89,14 +119,14 @@ export function captureEditorSnapshot(): EditorSnapshot {
     activeFile: editor.document.uri.fsPath,
     languageId: editor.document.languageId,
     dirty: editor.document.isDirty,
-    content: fullContent.slice(0, MAX_BUFFER_CHARS),
-    contentTruncated: fullContent.length > MAX_BUFFER_CHARS,
+    content: content.text,
+    contentTruncated: content.truncated,
     selection: {
-      text: selectedText.slice(0, MAX_SELECTION_CHARS),
+      text: selectionText.text,
       start: position(editor.selection.start),
       end: position(editor.selection.end),
       isEmpty: editor.selection.isEmpty,
-      truncated: selectedText.length > MAX_SELECTION_CHARS,
+      truncated: selectionText.truncated,
     },
     diagnostics: diagnosticResult.diagnostics,
     diagnosticsTruncated: diagnosticResult.truncated,

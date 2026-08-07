@@ -1,13 +1,9 @@
 import { createServer, type Server as HttpServer } from "node:http";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
-import {
-  localhostHostValidation,
-  localhostOriginValidation,
-  toNodeHandler,
-} from "@modelcontextprotocol/node";
 import * as z from "zod/v4";
 import type { EditorStateStore } from "./stateStore.js";
 import { readWorkspaceTextFile, searchWorkspace } from "./workspace.js";
+import { toNodeHandler, validateLoopbackRequest } from "./nodeHttpAdapter.js";
 
 function result(data: unknown) {
   return {
@@ -40,9 +36,10 @@ function buildMcpServer(store: EditorStateStore): McpServer {
       annotations: readOnly,
     },
     async () => {
-      const snapshot = store.getSnapshot();
+      const connected = store.isVscodeConnected();
+      const snapshot = connected ? store.getSnapshot() : null;
       return result({
-        vscodeConnected: store.isVscodeConnected(),
+        vscodeConnected: connected,
         workspaceFolders: snapshot?.workspaceFolders ?? [],
         activeFile: snapshot?.activeFile ?? null,
         capturedAt: snapshot?.capturedAt ?? null,
@@ -104,9 +101,9 @@ function buildMcpServer(store: EditorStateStore): McpServer {
     "read_file",
     {
       title: "Read workspace file",
-      description: "Use this when you need to read an existing text file inside the currently open VS Code workspace.",
+      description: "Use this when you need to read an existing text file inside an open VS Code workspace folder.",
       inputSchema: z.object({
-        path: z.string().min(1).describe("Absolute workspace path or a path relative to the first workspace folder."),
+        path: z.string().min(1).describe("Absolute workspace path, or a relative path that uniquely identifies a file across the open workspace folders."),
         startLine: z.number().int().positive().optional(),
         endLine: z.number().int().positive().optional(),
       }),
@@ -150,12 +147,11 @@ export function startMcpHttpServer(options: { port: number; store: EditorStateSt
 } {
   const handler = createMcpHandler(() => buildMcpServer(options.store), { responseMode: "json" });
   const nodeHandler = toNodeHandler(handler);
-  const validateHost = localhostHostValidation();
-  const validateOrigin = localhostOriginValidation();
 
   const server = createServer((req, res) => {
-    const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
+    if (!validateLoopbackRequest(req, res)) return;
 
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
     if (url.pathname === "/health") {
       res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: true, vscodeConnected: options.store.isVscodeConnected() }));
@@ -168,7 +164,6 @@ export function startMcpHttpServer(options: { port: number; store: EditorStateSt
       return;
     }
 
-    if (!validateHost(req, res) || !validateOrigin(req, res)) return;
     void nodeHandler(req, res);
   });
 
