@@ -10,7 +10,9 @@
     "dev:bridge": "npm run dev --workspace @chatgpt-bridge/bridge",
     "build": "npm run build --workspaces",
     "build:vscode": "npm run build --workspace @chatgpt-bridge/vscode-extension",
-    "typecheck": "npm run typecheck --workspaces"
+    "typecheck": "npm run typecheck --workspaces",
+    "test": "npm run test --workspaces --if-present",
+    "qa": "npm run typecheck && npm test && npm run build"
   },
   "engines": {
     "node": ">=20"
