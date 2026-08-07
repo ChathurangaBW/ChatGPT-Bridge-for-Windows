@@ -5,7 +5,7 @@ on:
   pull_request:
 
 jobs:
-  typecheck:
+  qa:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -13,5 +13,9 @@ jobs:
         with:
           node-version: 22
       - run: npm install
-      - run: npm run typecheck
-      - run: npm run build
+      - name: Dependency audit
+        run: npm audit --json
+        continue-on-error: true
+      - name: Emit generated lockfile for release QA
+        run: Get-Content package-lock.json -Raw
+      - run: npm run qa
