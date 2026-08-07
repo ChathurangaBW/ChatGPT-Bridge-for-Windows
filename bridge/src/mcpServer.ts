@@ -17,6 +17,10 @@ function result(data: unknown) {
 }
 
 function requireSnapshot(store: EditorStateStore) {
+  if (!store.isVscodeConnected()) {
+    throw new Error("VS Code is not currently connected to the local ChatGPT Bridge service.");
+  }
+
   const snapshot = store.getSnapshot();
   if (!snapshot) {
     throw new Error("No editor snapshot is available. Start VS Code with the ChatGPT Bridge extension enabled.");
