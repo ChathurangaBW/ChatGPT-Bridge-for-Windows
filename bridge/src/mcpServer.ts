@@ -1,13 +1,9 @@
 import { createServer, type Server as HttpServer } from "node:http";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
-import {
-  localhostHostValidation,
-  localhostOriginValidation,
-  toNodeHandler,
-} from "@modelcontextprotocol/node";
 import * as z from "zod/v4";
 import type { EditorStateStore } from "./stateStore.js";
 import { readWorkspaceTextFile, searchWorkspace } from "./workspace.js";
+import { toNodeHandler, validateLoopbackRequest } from "./nodeHttpAdapter.js";
 
 function result(data: unknown) {
   return {
@@ -151,11 +147,9 @@ export function startMcpHttpServer(options: { port: number; store: EditorStateSt
 } {
   const handler = createMcpHandler(() => buildMcpServer(options.store), { responseMode: "json" });
   const nodeHandler = toNodeHandler(handler);
-  const validateHost = localhostHostValidation();
-  const validateOrigin = localhostOriginValidation();
 
   const server = createServer((req, res) => {
-    if (!validateHost(req, res) || !validateOrigin(req, res)) return;
+    if (!validateLoopbackRequest(req, res)) return;
 
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     if (url.pathname === "/health") {
@@ -170,15 +164,7 @@ export function startMcpHttpServer(options: { port: number; store: EditorStateSt
       return;
     }
 
-    void Promise.resolve(nodeHandler(req, res)).catch((error: unknown) => {
-      console.error("MCP request failed", error);
-      if (!res.headersSent) {
-        res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify({ error: "MCP request failed" }));
-      } else {
-        res.destroy(error instanceof Error ? error : undefined);
-      }
-    });
+    void nodeHandler(req, res);
   });
 
   server.listen(options.port, "127.0.0.1");
