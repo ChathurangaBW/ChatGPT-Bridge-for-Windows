@@ -19,17 +19,49 @@ jobs:
       - name: Dependency audit
         run: npm audit --audit-level=moderate
       - run: npm run qa
-      - name: Package VS Code extension
-        run: npm run package:vscode
+      - name: Package release artifacts
+        run: npm run package:release
+      - name: Smoke packaged bridge executable
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath ".\artifacts\ChatGPTBridge.exe" -PassThru -WindowStyle Hidden
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 40; $i++) {
+              Start-Sleep -Milliseconds 500
+              if ($process.HasExited) {
+                throw "ChatGPTBridge.exe exited before the health endpoint became available (exit code $($process.ExitCode))."
+              }
+              try {
+                $health = Invoke-RestMethod -Uri "http://127.0.0.1:47322/health" -TimeoutSec 1
+                if ($health.ok -eq $true -and $health.vscodeConnected -eq $false) {
+                  $ready = $true
+                  break
+                }
+              } catch {
+                # The packaged process may still be starting.
+              }
+            }
+            if (-not $ready) {
+              throw "ChatGPTBridge.exe did not expose a healthy loopback endpoint within the smoke-test window."
+            }
+          } finally {
+            if (-not $process.HasExited) {
+              Stop-Process -Id $process.Id -Force
+            }
+          }
       - name: Export generated lockfile
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: qa-package-lock
           path: package-lock.json
           if-no-files-found: error
-      - name: Export VSIX
+      - name: Export release artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: chatgpt-bridge-vscode-0.1.0
-          path: artifacts/chatgpt-bridge-vscode-0.1.0.vsix
+          name: chatgpt-bridge-windows-0.1.0
+          path: |
+            artifacts/ChatGPTBridge.exe
+            artifacts/chatgpt-bridge-vscode-0.1.0.vsix
           if-no-files-found: error
