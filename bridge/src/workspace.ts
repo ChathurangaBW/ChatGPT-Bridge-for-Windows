@@ -6,14 +6,20 @@ const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_SCANNED_FILES = 5_000;
 const IGNORED_DIRECTORIES = new Set([
   ".git",
+  ".cache",
+  ".next",
+  ".turbo",
+  ".venv",
   "node_modules",
+  "vendor",
+  "venv",
   "dist",
   "out",
   "build",
   "coverage",
-  ".next",
-  ".turbo",
-  ".cache",
+  "target",
+  "bin",
+  "obj",
 ]);
 
 function normalizeForComparison(value: string): string {
@@ -24,19 +30,45 @@ function normalizeForComparison(value: string): string {
 function isInside(child: string, parent: string): boolean {
   const normalizedChild = normalizeForComparison(child);
   const normalizedParent = normalizeForComparison(parent);
-  return normalizedChild === normalizedParent || normalizedChild.startsWith(`${normalizedParent}${path.sep}`);
+  const relative = path.relative(normalizedParent, normalizedChild);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-export async function resolveWorkspaceFile(inputPath: string, snapshot: EditorSnapshot): Promise<string> {
+async function canonicalWorkspaceRoots(snapshot: EditorSnapshot): Promise<string[]> {
   if (snapshot.workspaceFolders.length === 0) {
     throw new Error("No VS Code workspace is currently open.");
   }
 
-  const realRoots = await Promise.all(snapshot.workspaceFolders.map((folder) => realpath(folder)));
-  const candidate = path.isAbsolute(inputPath)
-    ? inputPath
-    : path.resolve(snapshot.workspaceFolders[0], inputPath);
-  const realCandidate = await realpath(candidate);
+  const roots = await Promise.all(snapshot.workspaceFolders.map((folder) => realpath(folder)));
+  const unique = new Map<string, string>();
+  for (const root of roots) unique.set(normalizeForComparison(root), root);
+  return [...unique.values()];
+}
+
+async function resolveRelativeWorkspaceFile(inputPath: string, realRoots: string[]): Promise<string> {
+  const candidates: string[] = [];
+  for (const root of realRoots) {
+    try {
+      const candidate = await realpath(path.resolve(root, inputPath));
+      if (isInside(candidate, root)) candidates.push(candidate);
+    } catch {
+      // Try the next workspace root.
+    }
+  }
+
+  const unique = [...new Map(candidates.map((candidate) => [normalizeForComparison(candidate), candidate])).values()];
+  if (unique.length === 0) throw new Error("Requested file was not found in the open VS Code workspace.");
+  if (unique.length > 1) {
+    throw new Error("Relative path is ambiguous across workspace roots. Use an absolute workspace path.");
+  }
+  return unique[0];
+}
+
+export async function resolveWorkspaceFile(inputPath: string, snapshot: EditorSnapshot): Promise<string> {
+  const realRoots = await canonicalWorkspaceRoots(snapshot);
+  const realCandidate = path.isAbsolute(inputPath)
+    ? await realpath(inputPath)
+    : await resolveRelativeWorkspaceFile(inputPath, realRoots);
 
   if (!realRoots.some((root) => isInside(realCandidate, root))) {
     throw new Error("Requested path is outside the open VS Code workspace.");
@@ -70,10 +102,7 @@ export async function searchWorkspace(
   snapshot: EditorSnapshot,
   maxResults: number,
 ): Promise<{ matches: SearchMatch[]; scannedFiles: number; truncated: boolean }> {
-  if (snapshot.workspaceFolders.length === 0) {
-    throw new Error("No VS Code workspace is currently open.");
-  }
-
+  const realRoots = await canonicalWorkspaceRoots(snapshot);
   const needle = query.toLocaleLowerCase();
   const matches: SearchMatch[] = [];
   let scannedFiles = 0;
@@ -102,7 +131,7 @@ export async function searchWorkspace(
       const fullPath = path.join(directory, entry.name);
 
       if (entry.isDirectory()) {
-        if (!IGNORED_DIRECTORIES.has(entry.name)) await visit(fullPath);
+        if (!IGNORED_DIRECTORIES.has(entry.name.toLowerCase())) await visit(fullPath);
         continue;
       }
 
@@ -130,7 +159,7 @@ export async function searchWorkspace(
     }
   };
 
-  for (const root of snapshot.workspaceFolders) {
+  for (const root of realRoots) {
     await visit(root);
     if (truncated) break;
   }
