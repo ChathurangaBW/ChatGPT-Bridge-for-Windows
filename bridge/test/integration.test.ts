@@ -51,6 +51,19 @@ async function closeHttpServer(server: http.Server): Promise<void> {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 }
 
+function parseRpcPayload(text: string, contentType: string): any {
+  if (!contentType.includes("text/event-stream")) return JSON.parse(text);
+
+  const payloads = text
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trim())
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  if (payloads.length === 0) throw new Error("SSE response contained no JSON data event.");
+  return payloads[payloads.length - 1];
+}
+
 async function rpc(url: string, body: unknown): Promise<any> {
   const response = await fetch(url, {
     method: "POST",
@@ -61,7 +74,8 @@ async function rpc(url: string, body: unknown): Promise<any> {
     body: JSON.stringify(body),
   });
   assert.equal(response.status, 200);
-  return response.json();
+  const text = await response.text();
+  return parseRpcPayload(text, response.headers.get("content-type") ?? "");
 }
 
 function requestWithHost(port: number, host: string): Promise<number> {
