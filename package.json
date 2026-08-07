@@ -1,0 +1,18 @@
+{
+  "name": "chatgpt-bridge-for-windows",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "bridge",
+    "vscode-extension"
+  ],
+  "scripts": {
+    "dev:bridge": "npm run dev --workspace @chatgpt-bridge/bridge",
+    "build": "npm run build --workspaces",
+    "build:vscode": "npm run build --workspace @chatgpt-bridge/vscode-extension",
+    "typecheck": "npm run typecheck --workspaces"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
