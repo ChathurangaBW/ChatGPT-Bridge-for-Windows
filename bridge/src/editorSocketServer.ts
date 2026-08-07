@@ -85,6 +85,7 @@ export function startEditorSocketServer(options: {
     const sessionId = randomUUID();
     let authenticated = false;
     let counted = false;
+    let closing = false;
 
     const disconnectSession = (): void => {
       if (!counted) return;
@@ -92,23 +93,31 @@ export function startEditorSocketServer(options: {
       options.store.disconnected(sessionId);
     };
 
+    const rejectConnection = (reason: string): void => {
+      if (closing) return;
+      closing = true;
+      disconnectSession();
+      closePolicyViolation(socket, reason);
+    };
+
     const authTimer = setTimeout(() => {
-      if (!authenticated) closePolicyViolation(socket, "authentication timeout");
+      if (!authenticated) rejectConnection("authentication timeout");
     }, 5_000);
 
     socket.on("message", (raw) => {
+      if (closing) return;
+
       let message: unknown;
       try {
         message = JSON.parse(raw.toString("utf8"));
       } catch {
-        disconnectSession();
-        closePolicyViolation(socket, "invalid JSON");
+        rejectConnection("invalid JSON");
         return;
       }
 
       if (!authenticated) {
         if (!isHello(message) || !tokensEqual(message.token, options.token)) {
-          closePolicyViolation(socket, "invalid bridge token");
+          rejectConnection("invalid bridge token");
           return;
         }
 
@@ -122,14 +131,14 @@ export function startEditorSocketServer(options: {
 
       const snapshot = parseEditorSnapshot(message);
       if (!snapshot) {
-        disconnectSession();
-        closePolicyViolation(socket, "invalid editor snapshot");
+        rejectConnection("invalid editor snapshot");
         return;
       }
       options.store.update(sessionId, snapshot);
     });
 
     socket.on("close", () => {
+      closing = true;
       clearTimeout(authTimer);
       disconnectSession();
     });
