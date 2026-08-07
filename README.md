@@ -52,6 +52,7 @@ https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chat
 ```powershell
 git clone https://github.com/ChathurangaBW/ChatGPT-Bridge-for-Windows.git
 cd ChatGPT-Bridge-for-Windows
+git switch feature/mvp-readonly-bridge
 npm install
 npm run typecheck
 ```
@@ -76,12 +77,14 @@ The bridge creates a random local pairing secret at:
 
 The VS Code extension reads the same file. The secret is never intentionally sent outside the machine.
 
-Optional environment variables:
+Optional bridge environment variables:
 
 ```text
 BRIDGE_WS_PORT=47321
 BRIDGE_MCP_PORT=47322
 ```
+
+If you change `BRIDGE_WS_PORT`, set the VS Code setting `chatgptBridge.wsPort` to the same number and reload the extension. The MCP port is independent of the VS Code extension.
 
 ### 2. Build/run the VS Code extension
 
@@ -91,7 +94,7 @@ npm run build:vscode
 
 Open the `vscode-extension` folder in VS Code and press **F5** to launch an Extension Development Host. Start the bridge service first so the extension can read the pairing secret.
 
-The status-bar item shows whether the extension is connected to the local bridge.
+The status-bar item shows whether the extension is connected to the local bridge. Run **ChatGPT Bridge: Show Status** from the Command Palette to see the current connection state and WebSocket endpoint.
 
 ### 3. Test the MCP endpoint locally
 
@@ -105,6 +108,7 @@ Version 0.1 follows a least-privilege model:
 
 - both local listeners bind to `127.0.0.1` only;
 - VS Code ↔ bridge WebSocket requires a generated pairing secret;
+- editor-dependent MCP calls fail when VS Code is disconnected instead of returning stale editor state;
 - MCP tools are annotated read-only;
 - `read_file` resolves real paths and rejects paths outside current workspace roots;
 - workspace search skips symlinks, common generated/dependency directories, binary-looking files, and oversized files;
