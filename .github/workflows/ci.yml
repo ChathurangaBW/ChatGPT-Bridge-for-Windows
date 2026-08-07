@@ -2,10 +2,16 @@ name: CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   qa:
@@ -26,6 +32,8 @@ jobs:
         shell: pwsh
         run: |
           $process = Start-Process -FilePath ".\artifacts\ChatGPTBridge.exe" -PassThru -WindowStyle Hidden
+          $collision = $null
+          $badConfig = $null
           try {
             $ready = $false
             for ($i = 0; $i -lt 40; $i++) {
@@ -46,9 +54,35 @@ jobs:
             if (-not $ready) {
               throw "ChatGPTBridge.exe did not expose a healthy loopback endpoint within the smoke-test window."
             }
+
+            $collision = Start-Process -FilePath ".\artifacts\ChatGPTBridge.exe" -PassThru -WindowStyle Hidden
+            if (-not $collision.WaitForExit(10000)) {
+              throw "A second ChatGPTBridge.exe instance did not fail on occupied default ports."
+            }
+            if ($collision.ExitCode -eq 0) {
+              throw "A second ChatGPTBridge.exe instance unexpectedly exited successfully on occupied ports."
+            }
+
+            $healthAfterCollision = Invoke-RestMethod -Uri "http://127.0.0.1:47322/health" -TimeoutSec 2
+            if ($healthAfterCollision.ok -ne $true) {
+              throw "The original bridge became unhealthy after the port-collision smoke test."
+            }
+
+            $badConfig = Start-Process -FilePath ".\artifacts\ChatGPTBridge.exe" -PassThru -WindowStyle Hidden -Environment @{
+              BRIDGE_WS_PORT = "47321abc"
+              BRIDGE_MCP_PORT = "57322"
+            }
+            if (-not $badConfig.WaitForExit(10000)) {
+              throw "ChatGPTBridge.exe did not reject a malformed BRIDGE_WS_PORT value."
+            }
+            if ($badConfig.ExitCode -eq 0) {
+              throw "ChatGPTBridge.exe unexpectedly accepted a malformed BRIDGE_WS_PORT value."
+            }
           } finally {
-            if (-not $process.HasExited) {
-              Stop-Process -Id $process.Id -Force
+            foreach ($candidate in @($badConfig, $collision, $process)) {
+              if ($null -ne $candidate -and -not $candidate.HasExited) {
+                Stop-Process -Id $candidate.Id -Force
+              }
             }
           }
       - name: Export release artifacts
