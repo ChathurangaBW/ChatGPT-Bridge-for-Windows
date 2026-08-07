@@ -1,0 +1,47 @@
+{
+  "name": "chatgpt-bridge-vscode",
+  "displayName": "ChatGPT Bridge for Windows",
+  "description": "Publishes live VS Code editor context to the local ChatGPT Bridge service.",
+  "version": "0.1.0",
+  "publisher": "chathurangabw",
+  "private": true,
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": ["Other"],
+  "main": "./dist/extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "commands": [
+      {
+        "command": "chatgptBridge.showStatus",
+        "title": "ChatGPT Bridge: Show Status"
+      }
+    ],
+    "configuration": {
+      "title": "ChatGPT Bridge for Windows",
+      "properties": {
+        "chatgptBridge.wsPort": {
+          "type": "number",
+          "default": 47321,
+          "minimum": 1024,
+          "maximum": 65535,
+          "description": "Loopback WebSocket port used by the local ChatGPT Bridge service. Reload the extension after changing this value."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "ws": "8.21.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/vscode": "^1.100.0",
+    "@types/ws": "^8.5.0",
+    "typescript": "^6.0.0"
+  }
+}
