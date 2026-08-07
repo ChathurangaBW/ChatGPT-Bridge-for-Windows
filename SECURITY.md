@@ -21,19 +21,26 @@ VS Code must authenticate to the WebSocket with a random token stored under `%LO
 
 The MCP HTTP listener uses a small in-repository Node/Web adapter with explicit loopback Host/Origin validation. Do not change the listener to `0.0.0.0` merely to make ChatGPT connectivity easier. Use OpenAI's supported Secure MCP Tunnel or another supported authenticated MCP path.
 
+Listener startup is fail-fast. Invalid port configuration, identical WebSocket/MCP ports, or an occupied listener port terminates the bridge instead of leaving a partially running service.
+
 ### Local-machine trust boundary
 
 Loopback binding and the pairing token protect against unintended network/browser access; they do **not** create a security boundary against malicious software already running as the same Windows user. A same-user process may be able to read the pairing-token file, inspect local files, or interact with local processes. Treat the Windows user account as part of the trusted computing base.
 
 ## Editor-data minimization
 
-Published editor state is bounded before it leaves VS Code:
+Published editor state is bounded before it leaves VS Code and re-validated before it leaves the bridge over MCP:
 
 - active editor buffers are capped by UTF-8 byte size;
 - selections are capped separately;
 - diagnostic count and diagnostic field sizes are capped;
-- only file diagnostics under currently open workspace folders are published;
-- editor-dependent MCP calls fail after VS Code disconnects rather than returning stale editor state.
+- only file diagnostics under currently open workspace folders are published by the extension;
+- each authenticated VS Code window has an isolated snapshot session;
+- if the most-recent window disconnects, the bridge falls back only to a snapshot owned by another still-connected window;
+- active-editor and selection data are withheld unless the active file resolves canonically inside a current workspace root;
+- editor-dependent MCP calls fail after all VS Code windows disconnect rather than returning stale editor state.
+
+The MCP-layer canonical check is intentional defense in depth: extension-side filtering alone is not treated as the final privacy boundary.
 
 ## Filesystem containment
 
@@ -41,11 +48,13 @@ File reads use canonical real paths. A target must resolve under one of the real
 
 For multi-root workspaces, relative paths that resolve to more than one root are rejected as ambiguous; callers must use an absolute path inside an allowed workspace root.
 
-Workspace search does not follow symlinked directories/files, rejects access outside canonical workspace roots, and skips common dependency/build directories, binary-looking files, and oversized files.
+Workspace reads/search are bounded to UTF-8 text. NUL-containing/binary-looking data, invalid UTF-8, oversized files, symlinked entries, and common dependency/build directories are skipped or rejected. Search also has a maximum scanned-file count and result cap.
 
 ## Dependency and CI policy
 
-The Windows CI gate runs typechecking, behavioral tests, production builds, dependency audit, release packaging, and packaged-bridge smoke testing. The repository lockfile is used for deterministic CI installs once generated/committed.
+The Windows CI gate uses the committed npm lockfile for deterministic repository installs and runs typechecking, behavioral tests, production builds, dependency audit, release packaging, and packaged-bridge smoke testing.
+
+The packaged executable smoke test verifies normal health startup, failure on occupied default ports, failure on malformed port configuration, and that the original healthy bridge remains available after a collision attempt.
 
 Do not waive moderate-or-higher dependency audit findings without documenting the rationale and compensating controls.
 
