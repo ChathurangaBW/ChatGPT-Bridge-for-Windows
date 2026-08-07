@@ -16,6 +16,9 @@
   "categories": ["Other"],
   "main": "./dist/extension.js",
   "activationEvents": ["onStartupFinished"],
+  "vsce": {
+    "dependencies": false
+  },
   "contributes": {
     "commands": [
       {
@@ -37,17 +40,16 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json --noEmit && esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node20 --external:vscode --outfile=dist/extension.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "package:vsix": "npx --yes @vscode/vsce@3.9.2 package --allow-missing-repository --out ../artifacts/chatgpt-bridge-vscode-0.1.0.vsix"
-  },
-  "dependencies": {
-    "ws": "8.21.1"
+    "package:vsix": "npx --yes @vscode/vsce@3.9.2 package --no-dependencies --allow-missing-repository --out ../artifacts/chatgpt-bridge-vscode-0.1.0.vsix"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/vscode": "^1.100.0",
     "@types/ws": "^8.5.0",
-    "typescript": "^6.0.0"
+    "esbuild": "0.28.1",
+    "typescript": "^6.0.0",
+    "ws": "8.21.1"
   }
 }
