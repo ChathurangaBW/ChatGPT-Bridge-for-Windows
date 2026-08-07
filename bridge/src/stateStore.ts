@@ -1,26 +1,52 @@
 import type { EditorSnapshot } from "./types.js";
 
-export class EditorStateStore {
-  private snapshot: EditorSnapshot | null = null;
-  private vscodeConnections = 0;
+interface SessionState {
+  snapshot: EditorSnapshot | null;
+  sequence: number;
+}
 
-  update(snapshot: EditorSnapshot): void {
-    this.snapshot = snapshot;
+export class EditorStateStore {
+  private readonly sessions = new Map<string, SessionState>();
+  private activeSessionId: string | null = null;
+  private sequence = 0;
+
+  connected(sessionId: string): void {
+    if (!this.sessions.has(sessionId)) {
+      this.sessions.set(sessionId, { snapshot: null, sequence: 0 });
+    }
+  }
+
+  update(sessionId: string, snapshot: EditorSnapshot): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new Error("Cannot update a disconnected VS Code session.");
+
+    session.snapshot = snapshot;
+    session.sequence = ++this.sequence;
+    this.activeSessionId = sessionId;
   }
 
   getSnapshot(): EditorSnapshot | null {
-    return this.snapshot;
+    if (!this.activeSessionId) return null;
+    return this.sessions.get(this.activeSessionId)?.snapshot ?? null;
   }
 
-  connected(): void {
-    this.vscodeConnections += 1;
-  }
+  disconnected(sessionId: string): void {
+    const wasActive = this.activeSessionId === sessionId;
+    this.sessions.delete(sessionId);
+    if (!wasActive) return;
 
-  disconnected(): void {
-    this.vscodeConnections = Math.max(0, this.vscodeConnections - 1);
+    let nextSessionId: string | null = null;
+    let newestSequence = -1;
+    for (const [candidateId, session] of this.sessions) {
+      if (session.snapshot && session.sequence > newestSequence) {
+        nextSessionId = candidateId;
+        newestSequence = session.sequence;
+      }
+    }
+    this.activeSessionId = nextSessionId;
   }
 
   isVscodeConnected(): boolean {
-    return this.vscodeConnections > 0;
+    return this.sessions.size > 0;
   }
 }
