@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import * as z from "zod/v4";
 import type { EditorStateStore } from "./stateStore.js";
@@ -82,8 +82,15 @@ export function startEditorSocketServer(options: {
   });
 
   server.on("connection", (socket) => {
+    const sessionId = randomUUID();
     let authenticated = false;
     let counted = false;
+
+    const disconnectSession = (): void => {
+      if (!counted) return;
+      counted = false;
+      options.store.disconnected(sessionId);
+    };
 
     const authTimer = setTimeout(() => {
       if (!authenticated) closePolicyViolation(socket, "authentication timeout");
@@ -94,6 +101,7 @@ export function startEditorSocketServer(options: {
       try {
         message = JSON.parse(raw.toString("utf8"));
       } catch {
+        disconnectSession();
         closePolicyViolation(socket, "invalid JSON");
         return;
       }
@@ -107,22 +115,23 @@ export function startEditorSocketServer(options: {
         authenticated = true;
         counted = true;
         clearTimeout(authTimer);
-        options.store.connected();
+        options.store.connected(sessionId);
         socket.send(JSON.stringify({ type: "ready", protocol: 1 }));
         return;
       }
 
       const snapshot = parseEditorSnapshot(message);
       if (!snapshot) {
+        disconnectSession();
         closePolicyViolation(socket, "invalid editor snapshot");
         return;
       }
-      options.store.update(snapshot);
+      options.store.update(sessionId, snapshot);
     });
 
     socket.on("close", () => {
       clearTimeout(authTimer);
-      if (counted) options.store.disconnected();
+      disconnectSession();
     });
   });
 
