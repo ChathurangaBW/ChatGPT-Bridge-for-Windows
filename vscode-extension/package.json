@@ -17,7 +17,19 @@
         "command": "chatgptBridge.showStatus",
         "title": "ChatGPT Bridge: Show Status"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "ChatGPT Bridge for Windows",
+      "properties": {
+        "chatgptBridge.wsPort": {
+          "type": "number",
+          "default": 47321,
+          "minimum": 1024,
+          "maximum": 65535,
+          "description": "Loopback WebSocket port used by the local ChatGPT Bridge service. Reload the extension after changing this value."
+        }
+      }
+    }
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
