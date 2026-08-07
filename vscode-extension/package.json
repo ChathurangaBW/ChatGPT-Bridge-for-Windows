@@ -5,6 +5,11 @@
   "version": "0.1.0",
   "publisher": "chathurangabw",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ChathurangaBW/ChatGPT-Bridge-for-Windows.git",
+    "directory": "vscode-extension"
+  },
   "engines": {
     "vscode": "^1.100.0"
   },
@@ -33,7 +38,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "package:vsix": "npx --yes @vscode/vsce@3.9.2 package --allow-missing-repository --out ../artifacts/chatgpt-bridge-vscode-0.1.0.vsix"
   },
   "dependencies": {
     "ws": "8.21.1"
