@@ -7,11 +7,11 @@
     "vscode-extension"
   ],
   "scripts": {
-    "dev:bridge": "npm run dev --workspace @chatgpt-bridge/bridge",
+    "dev:bridge": "npm run dev --workspace bridge",
     "build": "npm run build --workspaces",
-    "build:vscode": "npm run build --workspace @chatgpt-bridge/vscode-extension",
-    "package:vscode": "node -e \"require('node:fs').mkdirSync('artifacts',{recursive:true})\" && npm run build:vscode && npm run package:vsix --workspace @chatgpt-bridge/vscode-extension",
-    "package:bridge": "node -e \"require('node:fs').mkdirSync('artifacts',{recursive:true})\" && npm run build --workspace @chatgpt-bridge/bridge && npx --yes @yao-pkg/pkg@6.21.0 bridge/dist/index.js --targets node22-win-x64 --output artifacts/ChatGPTBridge.exe --compress GZip",
+    "build:vscode": "npm run build --workspace vscode-extension",
+    "package:vscode": "node -e \"require('node:fs').mkdirSync('artifacts',{recursive:true})\" && npm run build:vscode && npm run package:vsix --workspace vscode-extension",
+    "package:bridge": "node -e \"require('node:fs').mkdirSync('artifacts',{recursive:true})\" && npm run build --workspace bridge && npx --yes @yao-pkg/pkg@6.21.0 bridge/dist/index.js --targets node22-win-x64 --output artifacts/ChatGPTBridge.exe --compress GZip",
     "package:release": "npm run package:vscode && npm run package:bridge",
     "typecheck": "npm run typecheck --workspaces",
     "test": "npm run test --workspaces --if-present",
