@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import { BridgeClient, type BridgeStatus } from "./bridgeClient.js";
 import { captureEditorSnapshot } from "./snapshot.js";
 
-const BRIDGE_PORT = 47321;
+const DEFAULT_BRIDGE_PORT = 47321;
 const DEBOUNCE_MS = 300;
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -31,7 +31,10 @@ export function activate(context: vscode.ExtensionContext): void {
     output.appendLine(`[${new Date().toISOString()}] ${next}${detail ? `: ${detail}` : ""}`);
   };
 
-  const client = new BridgeClient(BRIDGE_PORT, updateStatus);
+  const bridgePort = vscode.workspace
+    .getConfiguration("chatgptBridge")
+    .get<number>("wsPort", DEFAULT_BRIDGE_PORT);
+  const client = new BridgeClient(bridgePort, updateStatus);
 
   const publish = (): void => client.publish(captureEditorSnapshot());
   const schedulePublish = (): void => {
@@ -46,7 +49,9 @@ export function activate(context: vscode.ExtensionContext): void {
     status,
     output,
     vscode.commands.registerCommand("chatgptBridge.showStatus", () => {
-      void vscode.window.showInformationMessage(`ChatGPT Bridge: ${currentStatus} — ${currentDetail}`);
+      void vscode.window.showInformationMessage(
+        `ChatGPT Bridge: ${currentStatus} — ${currentDetail} (ws://127.0.0.1:${bridgePort})`,
+      );
     }),
     vscode.window.onDidChangeActiveTextEditor(schedulePublish),
     vscode.window.onDidChangeTextEditorSelection(schedulePublish),
