@@ -132,6 +132,7 @@ test("WebSocket bridge rejects a bad token and drops invalid-session snapshots i
     assert.deepEqual(store.getSnapshot(), validSnapshot);
 
     client.send(JSON.stringify({ ...validSnapshot, dirty: "not-a-boolean" }));
+    client.send(JSON.stringify({ ...validSnapshot, content: "must-not-apply-after-policy-violation" }));
     const [invalidCode] = await once(client, "close");
     assert.equal(invalidCode, 1008);
     assert.equal(store.isVscodeConnected(), false);
