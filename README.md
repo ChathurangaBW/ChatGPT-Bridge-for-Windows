@@ -23,18 +23,18 @@ OpenAI Secure MCP Tunnel
 ChatGPT custom MCP app
 ```
 
-The VS Code extension provides editor-only state that a filesystem-only MCP server cannot see, including unsaved buffers, the current selection, and VS Code diagnostics.
+The VS Code extension provides editor-only state that a filesystem-only MCP server cannot see, including unsaved buffers, the current selection, and VS Code diagnostics. The bridge re-checks the canonical workspace boundary before active-editor or selection data is returned over MCP; an editor outside the open workspace is withheld.
 
 ## MCP tools
 
 The bridge exposes six read-only tools:
 
-- `get_workspace` — current VS Code workspace folders and connection state.
-- `get_active_editor` — active file metadata and current editor buffer, including unsaved changes.
-- `get_selection` — current selection and selected text.
+- `get_workspace` — current VS Code workspace folders and connection state; an active path outside the canonical workspace is hidden.
+- `get_active_editor` — active workspace-file metadata and current editor buffer, including unsaved changes.
+- `get_selection` — current selection and selected text for the active workspace file.
 - `get_diagnostics` — diagnostics currently reported by VS Code for open workspace files.
-- `read_file` — safely read an existing text file inside an open workspace root.
-- `search_workspace` — bounded literal text search without shell execution.
+- `read_file` — safely read an existing UTF-8 text file inside an open workspace root.
+- `search_workspace` — bounded literal text search across UTF-8 workspace files without shell execution.
 
 ## Install the packaged Windows build
 
@@ -74,7 +74,7 @@ BRIDGE_WS_PORT=47321
 BRIDGE_MCP_PORT=47322
 ```
 
-The two ports must be different. If `BRIDGE_WS_PORT` is changed, set the VS Code setting `chatgptBridge.wsPort` to the same number and reload the extension.
+The two ports must be different and must be integers from 1024 through 65535. If a configured listener cannot bind—for example because another bridge instance already owns the port—the process exits non-zero instead of remaining partially available. If `BRIDGE_WS_PORT` is changed, set the VS Code setting `chatgptBridge.wsPort` to the same number and reload the extension.
 
 ### 2. Install the VS Code extension
 
@@ -92,13 +92,15 @@ code --install-extension .\chatgpt-bridge-vscode-0.1.0.vsix
 
 The status bar shows **ChatGPT Bridge** when connected. Run **ChatGPT Bridge: Show Status** from the Command Palette to inspect the current connection state and endpoint.
 
+Multiple VS Code windows may connect at the same time. Each authenticated window keeps its own snapshot; MCP uses the most recently updated connected window and falls back only to another still-connected window's own snapshot if that window closes.
+
 ### 3. Verify the local bridge
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:47322/health
 ```
 
-With VS Code connected, `vscodeConnected` should be `true`.
+With at least one authenticated VS Code window connected, `vscodeConnected` should be `true`.
 
 ## Connect the local MCP server to ChatGPT
 
@@ -163,7 +165,7 @@ artifacts\ChatGPTBridge.exe
 artifacts\chatgpt-bridge-vscode-0.1.0.vsix
 ```
 
-Packaging tools are version-pinned in the npm scripts. CI runs on Windows, audits dependencies, executes behavioral tests, builds the TypeScript projects, packages both artifacts, launches the packaged EXE, and probes its health endpoint.
+Packaging tool versions are pinned in the npm scripts. CI runs on Windows, audits repository dependencies, executes behavioral tests, builds the TypeScript projects, packages both artifacts, launches the packaged EXE, probes its health endpoint, verifies occupied-port failure, and verifies malformed port configuration fails closed.
 
 ## Security model
 
@@ -172,11 +174,13 @@ Version 0.1 follows a least-privilege design:
 - both local listeners bind only to `127.0.0.1`;
 - VS Code ↔ bridge WebSocket requires a generated pairing secret;
 - inbound editor snapshots are schema-validated and size-bounded;
+- snapshots are isolated by authenticated VS Code connection to prevent stale cross-window context;
 - MCP Host/Origin values and request-body size are validated at the local HTTP boundary;
-- editor-dependent MCP calls fail when VS Code disconnects instead of returning stale editor state;
+- active-editor and selection data are returned only when the active file resolves inside a canonical current workspace root;
+- editor-dependent MCP calls fail when all VS Code windows disconnect instead of returning stale editor state;
 - `read_file` resolves canonical paths and rejects paths outside current workspace roots;
 - ambiguous relative paths in multi-root workspaces are rejected;
-- workspace search skips symlinks, common generated/dependency directories, binary-looking files, and oversized files;
+- workspace reads/search accept only bounded UTF-8 text and skip symlinks, common generated/dependency directories, binary-looking files, invalid UTF-8 files, and oversized files;
 - no arbitrary shell/terminal tool exists;
 - no write/edit tool exists.
 
@@ -187,7 +191,7 @@ See [SECURITY.md](SECURITY.md) for the threat boundary and rules for future muta
 ```text
 bridge/
   src/                 local bridge, MCP server, security boundary
-  test/                state/filesystem/WebSocket/MCP integration tests
+  test/                config/state/filesystem/WebSocket/MCP integration tests
 
 vscode-extension/
   src/                 live VS Code context publisher
@@ -202,17 +206,22 @@ The automated suite covers:
 
 - authenticated and rejected VS Code WebSocket pairing;
 - schema validation of live editor snapshots;
-- editor state connection/disconnection lifecycle;
+- immediate stale-state removal after protocol violations/disconnects;
+- multiple VS Code windows and connected-snapshot fallback;
 - workspace canonical-path containment and multi-root ambiguity;
-- binary and oversized-file rejection;
+- active-editor/selection privacy for files outside canonical workspace roots;
+- binary, invalid-UTF-8, and oversized-file rejection;
 - bounded workspace search;
+- explicit beyond-EOF `read_file` validation;
+- strict bridge port configuration validation;
 - MCP health endpoint;
 - MCP initialize/tool discovery/tool call flow;
 - hostile Host rejection;
 - TypeScript typechecking/build;
 - dependency audit;
 - VSIX packaging;
-- packaged Windows EXE startup/health smoke test.
+- packaged Windows EXE startup/health smoke test;
+- packaged EXE occupied-port and malformed-config failure smoke tests.
 
 A CI pass validates the repository-controlled portions of the application. The final ChatGPT ↔ Secure MCP Tunnel connection still depends on the user's OpenAI organization, tunnel permissions/API key, and ChatGPT plan/workspace configuration and therefore is not exercised with repository secrets in public CI.
 

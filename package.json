@@ -11,11 +11,15 @@
     "build": "npm run build --workspaces",
     "build:vscode": "npm run build --workspace vscode-extension",
     "package:vscode": "node -e \"require('node:fs').mkdirSync('artifacts',{recursive:true})\" && npm run build:vscode && npm run package:vsix --workspace vscode-extension",
-    "package:bridge": "node -e \"require('node:fs').mkdirSync('artifacts',{recursive:true})\" && npm run build --workspace bridge && npx --yes @yao-pkg/pkg@6.21.0 bridge/dist/index.js --targets node22-win-x64 --output artifacts/ChatGPTBridge.exe --compress GZip",
+    "package:bridge": "node -e \"require('node:fs').mkdirSync('artifacts',{recursive:true})\" && npm run build --workspace bridge && pkg bridge/dist/index.js --targets node22-win-x64 --output artifacts/ChatGPTBridge.exe --compress GZip",
     "package:release": "npm run package:vscode && npm run package:bridge",
     "typecheck": "npm run typecheck --workspaces",
     "test": "npm run test --workspaces --if-present",
     "qa": "npm run typecheck && npm test && npm run build"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "3.9.2",
+    "@yao-pkg/pkg": "6.21.0"
   },
   "engines": {
     "node": ">=20"

@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import * as z from "zod/v4";
 import type { EditorStateStore } from "./stateStore.js";
@@ -82,47 +82,65 @@ export function startEditorSocketServer(options: {
   });
 
   server.on("connection", (socket) => {
+    const sessionId = randomUUID();
     let authenticated = false;
     let counted = false;
+    let closing = false;
+
+    const disconnectSession = (): void => {
+      if (!counted) return;
+      counted = false;
+      options.store.disconnected(sessionId);
+    };
+
+    const rejectConnection = (reason: string): void => {
+      if (closing) return;
+      closing = true;
+      disconnectSession();
+      closePolicyViolation(socket, reason);
+    };
 
     const authTimer = setTimeout(() => {
-      if (!authenticated) closePolicyViolation(socket, "authentication timeout");
+      if (!authenticated) rejectConnection("authentication timeout");
     }, 5_000);
 
     socket.on("message", (raw) => {
+      if (closing) return;
+
       let message: unknown;
       try {
         message = JSON.parse(raw.toString("utf8"));
       } catch {
-        closePolicyViolation(socket, "invalid JSON");
+        rejectConnection("invalid JSON");
         return;
       }
 
       if (!authenticated) {
         if (!isHello(message) || !tokensEqual(message.token, options.token)) {
-          closePolicyViolation(socket, "invalid bridge token");
+          rejectConnection("invalid bridge token");
           return;
         }
 
         authenticated = true;
         counted = true;
         clearTimeout(authTimer);
-        options.store.connected();
+        options.store.connected(sessionId);
         socket.send(JSON.stringify({ type: "ready", protocol: 1 }));
         return;
       }
 
       const snapshot = parseEditorSnapshot(message);
       if (!snapshot) {
-        closePolicyViolation(socket, "invalid editor snapshot");
+        rejectConnection("invalid editor snapshot");
         return;
       }
-      options.store.update(snapshot);
+      options.store.update(sessionId, snapshot);
     });
 
     socket.on("close", () => {
+      closing = true;
       clearTimeout(authTimer);
-      if (counted) options.store.disconnected();
+      disconnectSession();
     });
   });
 

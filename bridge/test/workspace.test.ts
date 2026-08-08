@@ -4,7 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import type { EditorSnapshot } from "../src/types.js";
-import { readWorkspaceTextFile, resolveWorkspaceFile, searchWorkspace } from "../src/workspace.js";
+import {
+  isWorkspacePath,
+  readWorkspaceTextFile,
+  resolveWorkspaceFile,
+  resolveWorkspacePath,
+  searchWorkspace,
+} from "../src/workspace.js";
 
 function snapshot(workspaceFolders: string[]): EditorSnapshot {
   return {
@@ -22,7 +28,7 @@ function snapshot(workspaceFolders: string[]): EditorSnapshot {
   };
 }
 
-test("workspace reads stay inside canonical roots and support unique multi-root relative paths", async (t) => {
+test("workspace paths stay inside canonical roots and support unique multi-root relative paths", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "chatgpt-bridge-workspace-"));
   const rootA = path.join(root, "a");
   const rootB = path.join(root, "b");
@@ -39,6 +45,9 @@ test("workspace reads stay inside canonical roots and support unique multi-root 
   const unique = await readWorkspaceTextFile("only-a.txt", state);
   assert.equal(unique.content, "alpha\n");
   assert.equal(await resolveWorkspaceFile(unique.path, state), unique.path);
+  assert.equal(await resolveWorkspacePath(unique.path, state), unique.path);
+  assert.equal(await isWorkspacePath(unique.path, state), true);
+  assert.equal(await isWorkspacePath(outside, state), false);
 
   await assert.rejects(() => resolveWorkspaceFile("same.txt", state), /ambiguous/i);
   await assert.rejects(() => resolveWorkspaceFile(outside, state), /outside/i);
@@ -61,15 +70,18 @@ test("workspace search is literal, bounded, and skips dependency/build directori
   assert.equal(result.truncated, false);
 });
 
-test("workspace reader rejects binary-looking and oversized files", async (t) => {
+test("workspace reader rejects binary-looking, invalid UTF-8, and oversized files", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "chatgpt-bridge-read-"));
   const binary = path.join(root, "binary.bin");
+  const invalidUtf8 = path.join(root, "invalid.txt");
   const large = path.join(root, "large.txt");
   await writeFile(binary, Buffer.from([65, 0, 66]));
+  await writeFile(invalidUtf8, Buffer.from([0xff, 0xfe, 0xfd]));
   await writeFile(large, Buffer.alloc(1024 * 1024 + 1, 65));
   t.after(() => rm(root, { recursive: true, force: true }));
 
   const state = snapshot([root]);
   await assert.rejects(() => readWorkspaceTextFile(binary, state), /binary/i);
+  await assert.rejects(() => readWorkspaceTextFile(invalidUtf8, state), /UTF-8/i);
   await assert.rejects(() => readWorkspaceTextFile(large, state), /exceeds/i);
 });
