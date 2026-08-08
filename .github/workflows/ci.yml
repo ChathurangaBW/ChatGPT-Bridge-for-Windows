@@ -4,11 +4,10 @@ on:
   push:
     branches:
       - main
-      - qa/final-v0.1-hardening
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -23,20 +22,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - name: Bootstrap locked dependencies
-        run: npm install
-      - name: Persist generated lockfile once
-        if: github.event_name == 'push' && github.ref == 'refs/heads/qa/final-v0.1-hardening'
-        shell: pwsh
-        run: |
-          $change = git status --porcelain -- package-lock.json
-          if ($change) {
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add package-lock.json
-            git commit -m "chore: lock release packaging toolchain"
-            git push origin HEAD:${{ github.ref_name }}
-          }
+      - run: npm ci
       - name: Dependency audit
         run: npm audit --audit-level=moderate
       - run: npm run qa
