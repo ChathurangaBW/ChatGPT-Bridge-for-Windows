@@ -53,6 +53,15 @@ async function openAuthenticatedClient(port: number, token: string): Promise<Web
   return client;
 }
 
+async function waitFor(condition: () => boolean, message: string, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.ok(condition(), message);
+}
+
 async function httpPort(server: http.Server): Promise<number> {
   if (!server.address()) await once(server, "listening");
   const address = server.address();
@@ -135,7 +144,7 @@ test("WebSocket bridge rejects a bad token and drops invalid-session snapshots i
     client.send(JSON.stringify({ ...validSnapshot, content: "must-not-apply-after-policy-violation" }));
     const [invalidCode] = await once(client, "close");
     assert.equal(invalidCode, 1008);
-    assert.equal(store.isVscodeConnected(), false);
+    await waitFor(() => !store.isVscodeConnected(), "Server did not remove the rejected VS Code session.");
     assert.equal(store.getSnapshot(), null);
   } finally {
     await closeWebSocketServer(server);
@@ -162,12 +171,16 @@ test("WebSocket bridge keeps snapshots isolated across multiple VS Code windows"
 
     windowB.close();
     await once(windowB, "close");
+    await waitFor(
+      () => store.getSnapshot()?.content === "window-a",
+      "Server did not fall back to the still-connected VS Code window snapshot.",
+    );
     assert.equal(store.isVscodeConnected(), true);
     assert.deepEqual(store.getSnapshot(), snapshotA);
 
     windowA.close();
     await once(windowA, "close");
-    assert.equal(store.isVscodeConnected(), false);
+    await waitFor(() => !store.isVscodeConnected(), "Server did not remove the final VS Code session.");
     assert.equal(store.getSnapshot(), null);
   } finally {
     await closeWebSocketServer(server);
