@@ -141,11 +141,11 @@ function buildMcpServer(store: EditorStateStore): McpServer {
       const file = await readWorkspaceTextFile(path, snapshot);
       const lines = file.content.split(/\r?\n/);
       const start = startLine ?? 1;
-      const end = endLine ?? lines.length;
-      if (end < start) throw new Error("endLine must be greater than or equal to startLine.");
       if (start > lines.length) {
         throw new Error(`startLine ${start} exceeds the file length of ${lines.length} lines.`);
       }
+      const end = endLine ?? lines.length;
+      if (end < start) throw new Error("endLine must be greater than or equal to startLine.");
       const clampedEnd = Math.min(end, lines.length);
       const content = lines.slice(start - 1, clampedEnd).join("\n");
       return result({ path: file.path, startLine: start, endLine: clampedEnd, content });
