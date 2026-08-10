@@ -8,7 +8,7 @@
     "types": "wrangler types",
     "typecheck": "wrangler types && tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/**/*.test.ts",
-    "smoke": "node test/runtime-smoke.mjs && node test/security-smoke.mjs && node test/multiwindow-smoke.mjs && node test/authorize-ui-smoke.mjs",
+    "smoke": "node test/runtime-smoke.mjs && node test/security-smoke.mjs && node test/multiwindow-smoke.mjs && node test/authorize-ui-smoke.mjs && node test/product-ui-smoke.mjs",
     "build": "wrangler deploy --dry-run --outdir ../artifacts/cloud-worker",
     "deploy": "wrangler deploy"
   },
