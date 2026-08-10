@@ -109,11 +109,13 @@ export class ControlPlane extends DurableObject<Env> {
     const deviceId = randomId("dev");
     const deviceSecret = randomToken();
     const secretHash = await sha256(deviceSecret);
-    const pairing = await this.createPairing(deviceId, now);
+    const pairingGeneration = 1;
+    const pairing = await this.createPairing(deviceId, pairingGeneration, now);
     const record: DeviceRecord = {
       deviceId,
       secretHash,
       createdAt: now,
+      pairingGeneration,
       currentPairingCode: pairing.pairingCode,
       pairingExpiresAt: pairing.pairingExpiresAt,
     };
@@ -161,7 +163,8 @@ export class ControlPlane extends DurableObject<Env> {
     if (!record) throw new Error("Unknown device.");
 
     if (record.currentPairingCode) await this.ctx.storage.delete(pairKey(record.currentPairingCode));
-    const pairing = await this.createPairing(deviceId, Date.now());
+    record.pairingGeneration += 1;
+    const pairing = await this.createPairing(deviceId, record.pairingGeneration, Date.now());
     record.currentPairingCode = pairing.pairingCode;
     record.pairingExpiresAt = pairing.pairingExpiresAt;
     await this.ctx.storage.put(deviceKey(deviceId), record);
@@ -211,6 +214,7 @@ export class ControlPlane extends DurableObject<Env> {
     const device = await this.ctx.storage.get<DeviceRecord>(deviceKey(pairing.deviceId));
     if (
       !device ||
+      device.pairingGeneration !== pairing.pairingGeneration ||
       device.currentPairingCode !== pairingCode ||
       !device.pairingExpiresAt ||
       device.pairingExpiresAt <= Date.now()
@@ -223,6 +227,7 @@ export class ControlPlane extends DurableObject<Env> {
       clientId: input.clientId,
       redirectUri: input.redirectUri,
       deviceId: device.deviceId,
+      pairingGeneration: device.pairingGeneration,
       codeChallenge: input.codeChallenge,
       scope: normalizeScope(input.scope),
       resource: input.resource,
@@ -246,9 +251,14 @@ export class ControlPlane extends DurableObject<Env> {
     }
     if (!(await verifyPkceS256(input.codeVerifier, record.codeChallenge))) throw new Error("PKCE verification failed.");
 
-    await this.ctx.storage.delete(key);
     const device = await this.ctx.storage.get<DeviceRecord>(deviceKey(record.deviceId));
     if (!device) throw new Error("Paired device no longer exists.");
+    if (device.pairingGeneration !== record.pairingGeneration) {
+      await this.ctx.storage.delete(key);
+      throw new Error("Authorization code was replaced by a newer pairing attempt.");
+    }
+
+    await this.ctx.storage.delete(key);
     device.pairedAt = Date.now();
     await this.ctx.storage.put(deviceKey(device.deviceId), device);
     return this.issueTokens(record.deviceId, record.clientId, record.scope, record.resource);
@@ -283,14 +293,18 @@ export class ControlPlane extends DurableObject<Env> {
     return record;
   }
 
-  private async createPairing(deviceId: string, now: number): Promise<{ pairingCode: string; pairingExpiresAt: number }> {
+  private async createPairing(
+    deviceId: string,
+    pairingGeneration: number,
+    now: number,
+  ): Promise<{ pairingCode: string; pairingExpiresAt: number }> {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const pairingCode = randomPairingCode();
       const key = pairKey(pairingCode);
       const existing = await this.ctx.storage.get<PairingRecord>(key);
       if (existing && existing.expiresAt > now) continue;
       const pairingExpiresAt = now + PAIRING_TTL_MS;
-      const record: PairingRecord = { deviceId, expiresAt: pairingExpiresAt };
+      const record: PairingRecord = { deviceId, pairingGeneration, expiresAt: pairingExpiresAt };
       await this.ctx.storage.put(key, record);
       return { pairingCode, pairingExpiresAt };
     }
