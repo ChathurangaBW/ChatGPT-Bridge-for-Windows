@@ -9,7 +9,15 @@ export const MAX_DIAGNOSTIC_SOURCE_BYTES = 256;
 export const MAX_DIAGNOSTIC_CODE_BYTES = 512;
 export const MAX_SEARCH_FILES = 5000;
 export const MAX_SEARCH_RESULTS = 100;
+export const SEARCH_PREVIEW_BYTES = 500;
 export const SEARCH_EXCLUDE = "**/{node_modules,.git,dist,build,out,coverage,.next,.cache,vendor}/**";
+
+export interface SearchMatch {
+  path: string;
+  line: number;
+  column: number;
+  preview: string;
+}
 
 export function truncateUtf8(value: string, maxBytes: number): { text: string; truncated: boolean } {
   if (maxBytes < 0) throw new Error("maxBytes must be non-negative.");
@@ -79,6 +87,50 @@ export async function readWorkspaceText(file: string): Promise<string> {
   } catch {
     throw new Error("File is not valid UTF-8 text.");
   }
+}
+
+export function selectLineRange(
+  content: string,
+  startLine?: number,
+  endLine?: number,
+): { startLine: number; endLine: number; content: string } {
+  if (startLine !== undefined && (!Number.isInteger(startLine) || startLine < 1)) {
+    throw new Error("startLine must be a positive integer.");
+  }
+  if (endLine !== undefined && (!Number.isInteger(endLine) || endLine < 1)) {
+    throw new Error("endLine must be a positive integer.");
+  }
+  const lines = content.split(/\r?\n/);
+  const start = startLine ?? 1;
+  if (start > lines.length) throw new Error(`startLine ${start} exceeds the file length of ${lines.length} lines.`);
+  const end = endLine ?? lines.length;
+  if (end < start) throw new Error("endLine must be greater than or equal to startLine.");
+  const clampedEnd = Math.min(end, lines.length);
+  return {
+    startLine: start,
+    endLine: clampedEnd,
+    content: lines.slice(start - 1, clampedEnd).join("\n"),
+  };
+}
+
+export function findLiteralMatches(file: string, content: string, query: string, maxResults: number): SearchMatch[] {
+  if (!query) return [];
+  const limit = Math.max(0, Math.floor(maxResults));
+  if (limit === 0) return [];
+  const needle = query.toLowerCase();
+  const lines = content.split(/\r?\n/);
+  const matches: SearchMatch[] = [];
+  for (let index = 0; index < lines.length && matches.length < limit; index += 1) {
+    const column = lines[index]!.toLowerCase().indexOf(needle);
+    if (column < 0) continue;
+    matches.push({
+      path: file,
+      line: index + 1,
+      column: column + 1,
+      preview: truncateUtf8(lines[index]!, SEARCH_PREVIEW_BYTES).text,
+    });
+  }
+  return matches;
 }
 
 export function sanitizeDiagnosticCode(value: unknown): string | number | undefined {
