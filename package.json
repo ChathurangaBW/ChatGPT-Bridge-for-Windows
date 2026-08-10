@@ -1,13 +1,16 @@
 {
   "name": "chatgpt-bridge-for-windows",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "workspaces": [
     "bridge",
-    "vscode-extension"
+    "vscode-extension",
+    "cloud-worker"
   ],
   "scripts": {
     "dev:bridge": "npm run dev --workspace bridge",
+    "dev:cloud": "npm run dev --workspace cloud-worker",
+    "deploy:cloud": "npm run deploy --workspace cloud-worker",
     "build": "npm run build --workspaces",
     "build:vscode": "npm run build --workspace vscode-extension",
     "package:vscode": "node -e \"require('node:fs').mkdirSync('artifacts',{recursive:true})\" && npm run build:vscode && npm run package:vsix --workspace vscode-extension",
@@ -19,7 +22,8 @@
   },
   "devDependencies": {
     "@vscode/vsce": "3.9.2",
-    "@yao-pkg/pkg": "6.21.0"
+    "@yao-pkg/pkg": "6.21.0",
+    "wrangler": "4.114.0"
   },
   "engines": {
     "node": ">=20"
