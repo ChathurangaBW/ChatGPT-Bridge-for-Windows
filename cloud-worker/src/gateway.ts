@@ -195,7 +195,7 @@ async function handleMcp(request: Request, origin: string, env: Env): Promise<Re
     return json(
       {
         jsonrpc: "2.0",
-        error: { code: -32001, message: error instanceof Error ? error.message : "Windows bridge unavailable." },
+        error: { code: -32001, message: error instanceof Error ? error.message : "VS Code bridge unavailable." },
         id: hints.id ?? null,
       },
       503,
@@ -218,6 +218,15 @@ function withIssuer(response: Response, origin: string): Response {
   }
 }
 
+async function rewriteAuthorizeHtml(response: Response): Promise<Response> {
+  if (!(response.headers.get("content-type") ?? "").toLowerCase().includes("text/html")) return response;
+  const body = (await response.text())
+    .replaceAll("<strong>ChatGPTBridge.exe</strong>", "<strong>ChatGPT Bridge VS Code extension</strong>")
+    .replaceAll("paired Windows bridge", "paired VS Code workspace")
+    .replaceAll("Authorize this PC", "Authorize this VS Code");
+  return new Response(body, { status: response.status, headers: response.headers });
+}
+
 const baseFetch = baseHandler.fetch as (request: Request, env: Env) => Promise<Response>;
 
 export default {
@@ -225,7 +234,7 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === "/mcp") return handleMcp(request, url.origin, env);
     const response = await baseFetch(request, env);
-    if (url.pathname === "/authorize") return withIssuer(response, url.origin);
+    if (url.pathname === "/authorize") return rewriteAuthorizeHtml(withIssuer(response, url.origin));
     return response;
   },
 } satisfies ExportedHandler<Env>;

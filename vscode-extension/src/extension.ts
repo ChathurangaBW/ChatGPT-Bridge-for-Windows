@@ -1,68 +1,61 @@
 import * as vscode from "vscode";
-import { BridgeClient, type BridgeStatus } from "./bridgeClient.js";
-import { captureEditorSnapshot } from "./snapshot.js";
-
-const DEFAULT_BRIDGE_PORT = 47321;
-const DEBOUNCE_MS = 300;
+import { CloudExtensionClient, type CloudStatusDetails } from "./cloudClient.js";
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("ChatGPT Bridge");
-  const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 20);
-  status.command = "chatgptBridge.showStatus";
-  status.show();
+  const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 20);
+  statusBar.command = "chatgptBridge.showStatus";
+  statusBar.show();
 
-  let currentStatus: BridgeStatus = "disconnected";
-  let currentDetail = "Bridge has not connected yet.";
-  let debounce: NodeJS.Timeout | null = null;
+  let latest: CloudStatusDetails = { status: "disconnected", detail: "Not connected yet." };
 
-  const updateStatus = (next: BridgeStatus, detail?: string): void => {
-    currentStatus = next;
-    currentDetail = detail ?? next;
-    if (next === "connected") {
-      status.text = "$(plug) ChatGPT Bridge";
-      status.tooltip = "Connected to local ChatGPT Bridge service";
-    } else if (next === "connecting") {
-      status.text = "$(sync~spin) ChatGPT Bridge";
-      status.tooltip = "Connecting to local ChatGPT Bridge service";
+  const updateStatus = (details: CloudStatusDetails): void => {
+    latest = details;
+    if (details.status === "connected") {
+      if (details.paired === false && details.pairingCode) {
+        statusBar.text = `$(key) ChatGPT Bridge: ${details.pairingCode}`;
+        statusBar.tooltip = "Cloud relay connected. Use this pairing code when ChatGPT asks you to authorize the VS Code bridge.";
+      } else {
+        statusBar.text = "$(plug) ChatGPT Bridge";
+        statusBar.tooltip = "VS Code is connected directly to the ChatGPT Bridge cloud relay.";
+      }
+    } else if (details.status === "connecting") {
+      statusBar.text = "$(sync~spin) ChatGPT Bridge";
+      statusBar.tooltip = details.detail;
     } else {
-      status.text = "$(debug-disconnect) ChatGPT Bridge";
-      status.tooltip = `Disconnected: ${currentDetail}`;
+      statusBar.text = "$(debug-disconnect) ChatGPT Bridge";
+      statusBar.tooltip = details.detail;
     }
-    output.appendLine(`[${new Date().toISOString()}] ${next}${detail ? `: ${detail}` : ""}`);
+    output.appendLine(`[${new Date().toISOString()}] ${details.status}: ${details.detail}`);
+    if (details.pairingCode) output.appendLine(`Pairing code: ${details.pairingCode}`);
   };
 
-  const bridgePort = vscode.workspace
-    .getConfiguration("chatgptBridge")
-    .get<number>("wsPort", DEFAULT_BRIDGE_PORT);
-  const client = new BridgeClient(bridgePort, updateStatus);
-
-  const publish = (): void => client.publish(captureEditorSnapshot());
-  const schedulePublish = (): void => {
-    if (debounce) clearTimeout(debounce);
-    debounce = setTimeout(() => {
-      debounce = null;
-      publish();
-    }, DEBOUNCE_MS);
-  };
+  const client = new CloudExtensionClient(context, updateStatus);
 
   context.subscriptions.push(
-    status,
+    statusBar,
     output,
-    vscode.commands.registerCommand("chatgptBridge.showStatus", () => {
-      void vscode.window.showInformationMessage(
-        `ChatGPT Bridge: ${currentStatus} — ${currentDetail} (ws://127.0.0.1:${bridgePort})`,
-      );
+    client,
+    vscode.commands.registerCommand("chatgptBridge.showStatus", async () => {
+      const lines = [
+        `ChatGPT Bridge: ${latest.status}`,
+        latest.detail,
+        latest.deviceId ? `Device: ${latest.deviceId}` : "",
+        latest.pairingCode && latest.paired === false ? `Pairing code: ${latest.pairingCode}` : "",
+      ].filter(Boolean);
+      const actions = latest.pairingCode && latest.paired === false ? ["Copy Pairing Code", "Open Pairing Page"] : [];
+      const selected = await vscode.window.showInformationMessage(lines.join(" — "), ...actions);
+      if (selected === "Copy Pairing Code") await client.copyPairingCode();
+      if (selected === "Open Pairing Page") await client.openPairingPage();
     }),
-    vscode.window.onDidChangeActiveTextEditor(schedulePublish),
-    vscode.window.onDidChangeTextEditorSelection(schedulePublish),
-    vscode.workspace.onDidChangeTextDocument(schedulePublish),
-    vscode.workspace.onDidChangeWorkspaceFolders(schedulePublish),
-    vscode.languages.onDidChangeDiagnostics(schedulePublish),
-    { dispose: () => client.stop() },
+    vscode.commands.registerCommand("chatgptBridge.copyPairingCode", () => client.copyPairingCode()),
+    vscode.commands.registerCommand("chatgptBridge.openPairingPage", () => client.openPairingPage()),
+    vscode.window.onDidChangeWindowState((state) => {
+      if (state.focused) client.announceFocus();
+    }),
   );
 
   client.start();
-  publish();
 }
 
 export function deactivate(): void {
