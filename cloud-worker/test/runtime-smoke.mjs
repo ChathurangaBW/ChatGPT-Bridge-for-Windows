@@ -4,6 +4,7 @@ import WebSocket from "ws";
 
 const baseUrl = (process.env.BRIDGE_SMOKE_URL ?? "http://127.0.0.1:8787").replace(/\/+$/, "");
 const mcpResource = `${baseUrl}/mcp`;
+const normalizedMcpAccept = "application/json, text/event-stream";
 
 function b64url(buffer) {
   return Buffer.from(buffer).toString("base64url");
@@ -42,6 +43,44 @@ async function openDeviceSocket(deviceId, deviceSecret) {
   assert.equal(ready.type, "agent_ready");
   assert.equal(ready.deviceId, deviceId);
   return socket;
+}
+
+async function exerciseRelay(socket, accessToken, accept, id) {
+  const relayHandled = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Timed out waiting for relayed MCP request with Accept ${accept}.`)), 8_000);
+    socket.once("message", (raw) => {
+      clearTimeout(timer);
+      const request = JSON.parse(raw.toString("utf8"));
+      assert.equal(request.type, "mcp_request");
+      assert.equal(request.method, "POST");
+      assert.equal(request.headers.accept, normalizedMcpAccept);
+      const rpc = JSON.parse(request.body);
+      assert.equal(rpc.method, "tools/list");
+      socket.send(
+        JSON.stringify({
+          type: "mcp_response",
+          requestId: request.requestId,
+          status: 200,
+          headers: { "content-type": "application/json; charset=utf-8" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { tools: [] } }),
+        }),
+      );
+      resolve();
+    });
+  });
+
+  const mcpResponsePromise = fetch(mcpResource, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json",
+      accept,
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/list", params: {} }),
+  });
+  const [mcpResponse] = await Promise.all([mcpResponsePromise, relayHandled]);
+  assert.equal(mcpResponse.status, 200);
+  assert.deepEqual(await mcpResponse.json(), { jsonrpc: "2.0", id, result: { tools: [] } });
 }
 
 async function main() {
@@ -143,40 +182,10 @@ async function main() {
     assert.equal(pairedStatus.body.paired, true);
     assert.equal(pairedStatus.body.pairingCode, pairingCode);
 
-    const relayHandled = new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("Timed out waiting for relayed MCP request.")), 8_000);
-      socket.once("message", (raw) => {
-        clearTimeout(timer);
-        const request = JSON.parse(raw.toString("utf8"));
-        assert.equal(request.type, "mcp_request");
-        assert.equal(request.method, "POST");
-        const rpc = JSON.parse(request.body);
-        assert.equal(rpc.method, "tools/list");
-        socket.send(
-          JSON.stringify({
-            type: "mcp_response",
-            requestId: request.requestId,
-            status: 200,
-            headers: { "content-type": "application/json; charset=utf-8" },
-            body: JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result: { tools: [] } }),
-          }),
-        );
-        resolve();
-      });
-    });
-
-    const mcpResponsePromise = fetch(mcpResource, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${token.body.access_token}`,
-        "content-type": "application/json",
-        accept: "application/json, text/event-stream",
-      },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/list", params: {} }),
-    });
-    const [mcpResponse] = await Promise.all([mcpResponsePromise, relayHandled]);
-    assert.equal(mcpResponse.status, 200);
-    assert.deepEqual(await mcpResponse.json(), { jsonrpc: "2.0", id: 7, result: { tools: [] } });
+    await exerciseRelay(socket, token.body.access_token, "application/json, text/event-stream", 7);
+    await exerciseRelay(socket, token.body.access_token, "application/json", 8);
+    await exerciseRelay(socket, token.body.access_token, "text/event-stream", 9);
+    await exerciseRelay(socket, token.body.access_token, "*/*", 10);
 
     const refresh = await jsonFetch("/token", {
       method: "POST",
