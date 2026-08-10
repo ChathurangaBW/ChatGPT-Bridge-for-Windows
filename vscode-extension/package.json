@@ -10,10 +10,12 @@
     "url": "https://github.com/ChathurangaBW/ChatGPT-Bridge-for-Windows.git",
     "directory": "vscode-extension"
   },
+  "homepage": "https://github.com/ChathurangaBW/ChatGPT-Bridge-for-Windows",
   "engines": {
     "vscode": "^1.100.0"
   },
   "categories": ["Other"],
+  "keywords": ["ChatGPT", "MCP", "workspace", "AI"],
   "main": "./dist/extension.js",
   "activationEvents": ["onStartupFinished"],
   "vsce": {
@@ -21,6 +23,10 @@
   },
   "contributes": {
     "commands": [
+      {
+        "command": "chatgptBridge.openSetup",
+        "title": "ChatGPT Bridge: Open Setup"
+      },
       {
         "command": "chatgptBridge.showStatus",
         "title": "ChatGPT Bridge: Show Status"
