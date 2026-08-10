@@ -138,23 +138,40 @@ jobs:
       - name: Smoke clean VS Code profile install and uninstall
         shell: pwsh
         run: |
-          $code = Get-Command code -ErrorAction SilentlyContinue
-          if (-not $code) { throw "VS Code CLI is not available on the Windows release runner." }
+          $codePath = (Get-Command code -ErrorAction SilentlyContinue)?.Source
+          if (-not $codePath) {
+            $choco = Get-Command choco -ErrorAction SilentlyContinue
+            if (-not $choco) { throw "Neither VS Code CLI nor Chocolatey is available on the Windows release runner." }
+            & $choco.Source install vscode -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "Unable to install VS Code for the clean-profile release smoke." }
+            foreach ($candidate in @(
+              "C:\Program Files\Microsoft VS Code\bin\code.cmd",
+              "C:\Program Files\Microsoft VS Code\bin\code.exe",
+              "$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd"
+            )) {
+              if (Test-Path $candidate) {
+                $codePath = $candidate
+                break
+              }
+            }
+          }
+          if (-not $codePath) { throw "VS Code CLI could not be resolved after installation." }
+
           $userData = Join-Path $env:RUNNER_TEMP "bridge-vscode-user"
           $extensions = Join-Path $env:RUNNER_TEMP "bridge-vscode-extensions"
           New-Item -ItemType Directory -Force -Path $userData, $extensions | Out-Null
           $vsix = (Resolve-Path ".\artifacts\chatgpt-bridge-vscode-0.2.0.vsix").Path
 
-          & $code.Source --user-data-dir $userData --extensions-dir $extensions --install-extension $vsix --force
+          & $codePath --user-data-dir $userData --extensions-dir $extensions --install-extension $vsix --force
           if ($LASTEXITCODE -ne 0) { throw "VSIX install into clean VS Code profile failed." }
-          $installed = & $code.Source --user-data-dir $userData --extensions-dir $extensions --list-extensions --show-versions
+          $installed = @(& $codePath --user-data-dir $userData --extensions-dir $extensions --list-extensions --show-versions)
           if ($LASTEXITCODE -ne 0 -or $installed -notcontains "chathurangabw.chatgpt-bridge-vscode@0.2.0") {
             throw "Installed extension/version was not found in the clean VS Code profile."
           }
 
-          & $code.Source --user-data-dir $userData --extensions-dir $extensions --uninstall-extension chathurangabw.chatgpt-bridge-vscode
+          & $codePath --user-data-dir $userData --extensions-dir $extensions --uninstall-extension chathurangabw.chatgpt-bridge-vscode
           if ($LASTEXITCODE -ne 0) { throw "VSIX uninstall from clean VS Code profile failed." }
-          $remaining = & $code.Source --user-data-dir $userData --extensions-dir $extensions --list-extensions --show-versions
+          $remaining = @(& $codePath --user-data-dir $userData --extensions-dir $extensions --list-extensions --show-versions)
           if ($remaining -contains "chathurangabw.chatgpt-bridge-vscode@0.2.0") {
             throw "Extension remained installed after uninstall."
           }
