@@ -21,6 +21,7 @@ interface AuthorizeParams {
   resource: string;
 }
 
+const MAX_OAUTH_BODY_BYTES = 64 * 1024;
 const SAFE_REQUEST_HEADERS = ["content-type", "accept", "mcp-protocol-version", "mcp-session-id", "last-event-id"];
 const SAFE_RESPONSE_HEADERS = ["content-type", "mcp-session-id", "cache-control"];
 
@@ -28,10 +29,16 @@ function control(env: Env) {
   return env.CONTROL.getByName("global");
 }
 
+function requestIp(request: Request): string {
+  return request.headers.get("CF-Connecting-IP") ?? "unknown";
+}
+
 function json(data: unknown, status = 200, extraHeaders?: HeadersInit): Response {
   const headers = new Headers(extraHeaders);
   headers.set("content-type", "application/json; charset=utf-8");
   headers.set("cache-control", "no-store");
+  headers.set("x-content-type-options", "nosniff");
+  headers.set("referrer-policy", "no-referrer");
   return new Response(JSON.stringify(data), { status, headers });
 }
 
@@ -43,6 +50,7 @@ function html(body: string, status = 200): Response {
       "cache-control": "no-store",
       "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
       "x-content-type-options": "nosniff",
+      "referrer-policy": "no-referrer",
     },
   });
 }
@@ -58,6 +66,17 @@ function bearerToken(request: Request): string | null {
   const header = request.headers.get("authorization") ?? "";
   const match = /^Bearer\s+(.+)$/i.exec(header.trim());
   return match?.[1] ?? null;
+}
+
+async function readBoundedText(request: Request, maxBytes: number): Promise<string> {
+  const declared = request.headers.get("content-length");
+  if (declared) {
+    const size = Number(declared);
+    if (Number.isFinite(size) && size > maxBytes) throw new Error("request_body_too_large");
+  }
+  const text = await request.text();
+  if (new TextEncoder().encode(text).byteLength > maxBytes) throw new Error("request_body_too_large");
+  return text;
 }
 
 function protectedResourceMetadata(origin: string) {
@@ -93,7 +112,7 @@ function unauthorized(origin: string): Response {
     { error: "authorization_required" },
     401,
     {
-      "www-authenticate": `Bearer realm="chatgpt-bridge", resource_metadata="${origin}/.well-known/oauth-protected-resource", scope="${MCP_SCOPE}"`,
+      "www-authenticate": `Bearer realm="chatgpt-bridge", resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp", scope="${MCP_SCOPE}"`,
     },
   );
 }
@@ -122,7 +141,7 @@ async function validateAuthorizeParams(params: AuthorizeParams, origin: string, 
 }
 
 function authorizationPage(params: AuthorizeParams, pairingCode: string, error?: string): Response {
-  const hidden = [
+  const hidden: Array<[string, string]> = [
     ["response_type", params.responseType],
     ["client_id", params.clientId],
     ["redirect_uri", params.redirectUri],
@@ -131,7 +150,8 @@ function authorizationPage(params: AuthorizeParams, pairingCode: string, error?:
     ["scope", params.scope],
     ["state", params.state],
     ["resource", params.resource],
-  ]
+  ];
+  const hiddenFields = hidden
     .map(([name, value]) => `<input type="hidden" name="${escapeHtml(name)}" value="${escapeHtml(value)}">`)
     .join("\n");
 
@@ -146,15 +166,18 @@ body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;max-width:560px;mar
 </head>
 <body><main><h1>Connect ChatGPT Bridge</h1><p>Enter the pairing code shown by <strong>ChatGPTBridge.exe</strong> on this PC. This authorizes ChatGPT to use only the paired Windows bridge.</p>
 ${error ? `<div class="error">${escapeHtml(error)}</div>` : ""}
-<form method="post" action="/authorize">${hidden}<label for="pairing_code">Pairing code</label><input id="pairing_code" name="pairing_code" type="text" autocomplete="one-time-code" spellcheck="false" value="${escapeHtml(pairingCode)}" placeholder="ABCD-EFGH-JKLM" required><button type="submit">Authorize this PC</button></form></main></body></html>`);
+<form method="post" action="/authorize">${hiddenFields}<label for="pairing_code">Pairing code</label><input id="pairing_code" name="pairing_code" type="text" autocomplete="one-time-code" spellcheck="false" value="${escapeHtml(pairingCode)}" placeholder="ABCD-EFGH-JKLM" required><button type="submit">Authorize this PC</button></form></main></body></html>`);
 }
 
 async function handleRegister(request: Request, env: Env): Promise<Response> {
   if (request.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { allow: "POST" } });
   let body: unknown;
   try {
-    body = await request.json();
-  } catch {
+    body = JSON.parse(await readBoundedText(request, MAX_OAUTH_BODY_BYTES));
+  } catch (error) {
+    if (error instanceof Error && error.message === "request_body_too_large") {
+      return oauthError("invalid_client_metadata", "Registration request is too large.", 413);
+    }
     return oauthError("invalid_client_metadata", "Request body must be JSON.");
   }
   const input = body as { redirect_uris?: unknown; client_name?: unknown; token_endpoint_auth_method?: unknown };
@@ -165,10 +188,13 @@ async function handleRegister(request: Request, env: Env): Promise<Response> {
     return oauthError("invalid_client_metadata", "Only public OAuth clients using token_endpoint_auth_method=none are supported.");
   }
   try {
-    const client = await control(env).registerClient({
-      redirectUris: input.redirect_uris,
-      ...(typeof input.client_name === "string" ? { clientName: input.client_name } : {}),
-    });
+    const client = await control(env).registerClient(
+      {
+        redirectUris: input.redirect_uris,
+        ...(typeof input.client_name === "string" ? { clientName: input.client_name } : {}),
+      },
+      requestIp(request),
+    );
     return json(
       {
         client_id: client.clientId,
@@ -187,7 +213,15 @@ async function handleRegister(request: Request, env: Env): Promise<Response> {
 }
 
 async function handleAuthorize(request: Request, origin: string, env: Env): Promise<Response> {
-  const values = request.method === "POST" ? new URLSearchParams(await request.text()) : new URL(request.url).searchParams;
+  if (request.method !== "GET" && request.method !== "POST") {
+    return new Response("Method not allowed", { status: 405, headers: { allow: "GET, POST" } });
+  }
+  let values: URLSearchParams;
+  try {
+    values = request.method === "POST" ? new URLSearchParams(await readBoundedText(request, MAX_OAUTH_BODY_BYTES)) : new URL(request.url).searchParams;
+  } catch {
+    return html("<h1>Authorization request rejected</h1><p>Request body is too large.</p>", 413);
+  }
   const params = readAuthorizeParams(values);
   const validationError = await validateAuthorizeParams(params, origin, env);
   if (validationError) return html(`<h1>Authorization request rejected</h1><p>${escapeHtml(validationError)}</p>`, 400);
@@ -215,7 +249,12 @@ async function handleAuthorize(request: Request, origin: string, env: Env): Prom
 
 async function handleToken(request: Request, origin: string, env: Env): Promise<Response> {
   if (request.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { allow: "POST" } });
-  const values = new URLSearchParams(await request.text());
+  let values: URLSearchParams;
+  try {
+    values = new URLSearchParams(await readBoundedText(request, MAX_OAUTH_BODY_BYTES));
+  } catch {
+    return oauthError("invalid_request", "Token request is too large.", 413);
+  }
   const grantType = values.get("grant_type") ?? "";
   const clientId = values.get("client_id") ?? "";
   const resource = values.get("resource") ?? "";
@@ -255,7 +294,7 @@ async function handleToken(request: Request, origin: string, env: Env): Promise<
 async function handleDeviceRegister(request: Request, origin: string, env: Env): Promise<Response> {
   if (request.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { allow: "POST" } });
   try {
-    return json(await control(env).registerDevice(origin, request.headers.get("CF-Connecting-IP") ?? "unknown"), 201);
+    return json(await control(env).registerDevice(origin, requestIp(request)), 201);
   } catch (error) {
     return json({ error: error instanceof Error ? error.message : "Device registration failed." }, 429);
   }
@@ -272,6 +311,7 @@ async function requireDevice(request: Request, env: Env): Promise<{ deviceId: st
 }
 
 async function handleDeviceStatus(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "GET") return new Response("Method not allowed", { status: 405, headers: { allow: "GET" } });
   const auth = await requireDevice(request, env);
   if (auth instanceof Response) return auth;
   try {
@@ -295,7 +335,9 @@ async function handleRotatePairing(request: Request, env: Env): Promise<Response
 }
 
 async function handleDeviceConnect(request: Request, env: Env): Promise<Response> {
-  if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return new Response("Expected WebSocket", { status: 426 });
+  if (request.method !== "GET" || request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+    return new Response("Expected WebSocket", { status: 426 });
+  }
   const auth = await requireDevice(request, env);
   if (auth instanceof Response) return auth;
   const headers = new Headers(request.headers);
@@ -309,19 +351,27 @@ async function handleMcp(request: Request, origin: string, env: Env): Promise<Re
   if (request.method !== "POST" && request.method !== "DELETE") {
     return new Response("Method not allowed", { status: 405, headers: { allow: "POST, DELETE" } });
   }
+  if (request.method === "POST") {
+    const contentType = request.headers.get("content-type") ?? "";
+    if (!contentType.toLowerCase().includes("application/json")) return json({ error: "MCP POST requests must use application/json." }, 415);
+  }
   const token = bearerToken(request);
   if (!token) return unauthorized(origin);
   const resource = `${origin}/mcp`;
   const auth = await control(env).introspectAccessToken(token, resource);
   if (!auth) return unauthorized(origin);
 
-  const body = request.method === "POST" ? await request.text() : "";
-  if (new TextEncoder().encode(body).byteLength > MAX_MCP_BODY_BYTES) return json({ error: "MCP request body is too large." }, 413);
+  let body = "";
+  try {
+    body = request.method === "POST" ? await readBoundedText(request, MAX_MCP_BODY_BYTES) : "";
+  } catch {
+    return json({ error: "MCP request body is too large." }, 413);
+  }
 
   const headers: Record<string, string> = {};
   for (const name of SAFE_REQUEST_HEADERS) {
     const value = request.headers.get(name);
-    if (value) headers[name] = value;
+    if (value && value.length <= 4096) headers[name] = value;
   }
   const relayRequest: CloudMcpRequest = {
     type: "mcp_request",
@@ -340,6 +390,7 @@ async function handleMcp(request: Request, origin: string, env: Env): Promise<Re
     }
     if (!responseHeaders.has("content-type")) responseHeaders.set("content-type", "application/json; charset=utf-8");
     responseHeaders.set("cache-control", "no-store");
+    responseHeaders.set("x-content-type-options", "nosniff");
     return new Response(response.body, { status: response.status, headers: responseHeaders });
   } catch (error) {
     return json(
