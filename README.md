@@ -105,12 +105,31 @@ POST /token
 POST /mcp
 ```
 
-Operator deployment:
+### Production deployment gate
+
+Production is deployed from GitHub Actions by `.github/workflows/production-worker.yml`. A push to `main` that changes Worker/runtime dependencies deploys the exact repository state and then runs the public production OAuth/MCP and multi-window smoke suites against:
+
+```text
+https://lucky-heart-f5b9.chatgpt-bridge.workers.dev
+```
+
+The workflow also runs a scheduled production smoke every six hours so a stale or regressed Worker cannot remain silently green in repository CI.
+
+Repository operators configure these two GitHub Actions secrets once:
+
+- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_ACCOUNT_ID`
+
+Those are **deployment credentials only**. They are never included in the VSIX, never requested from an end user, and are unrelated to the user's ChatGPT account or pairing flow.
+
+Manual operator deployment remains available for recovery:
 
 ```powershell
 npm ci
 npx wrangler login
 npm run deploy:cloud
+$env:BRIDGE_SMOKE_URL = "https://lucky-heart-f5b9.chatgpt-bridge.workers.dev"
+npm run smoke:production --workspace cloud-worker
 ```
 
 ## Security boundary
@@ -160,6 +179,8 @@ npm run package:release
 
 CI runs deterministic install, dependency audit, TypeScript checks/builds, read-only bridge/Worker regression tests, a real `workerd` OAuth/MCP relay smoke, focused multi-window routing smoke, VSIX packaging, and a packaged-VSIX inspection that fails if an EXE or the removed localhost bridge endpoint is present.
 
+Production deployment has an additional public-origin gate: the deployed Worker must pass the same OAuth/MCP compatibility behavior used by the release smoke before the deployment workflow succeeds.
+
 The release artifact upload contains only the VSIX.
 
 ## Repository layout
@@ -168,7 +189,7 @@ The release artifact upload contains only the VSIX.
 vscode-extension/   complete end-user VSIX client
 cloud-worker/       hosted OAuth + MCP device relay
 bridge/             legacy v0.1/v0.2 agent source retained for regression/migration reference; not packaged
-.github/workflows/  deterministic QA and VSIX-only release gate
+.github/workflows/  deterministic QA, deployment, production smoke, and VSIX-only release gates
 ```
 
 ## License
