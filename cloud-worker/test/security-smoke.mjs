@@ -103,19 +103,6 @@ async function refresh({ refreshToken, clientId, scope = "bridge:read offline_ac
   });
 }
 
-async function issueTokens(device, client, pkcePair) {
-  const auth = await authorize({
-    clientId: client.clientId,
-    redirectUri: client.redirectUri,
-    pairingCode: device.pairingCode,
-    challenge: pkcePair.challenge,
-  });
-  const code = codeFrom(auth);
-  const token = await exchange({ code, clientId: client.clientId, redirectUri: client.redirectUri, verifier: pkcePair.verifier });
-  assert.equal(token.response.status, 200);
-  return token.body;
-}
-
 async function main() {
   // Strict methods/content types and bounded public bodies.
   assert.equal((await response("/register", { method: "GET" })).status, 405);
@@ -172,11 +159,11 @@ async function main() {
   assert.equal(typeof refreshToken, "string");
   assert.equal((await refresh({ refreshToken, clientId: "wrong-client" })).response.status, 400);
   assert.equal((await refresh({ refreshToken, clientId: client.clientId, resourceValue: `${baseUrl}/wrong` })).response.status, 400);
-  const broaden = await refresh({ refreshToken, clientId: client.clientId, scope: "bridge:read offline_access admin" });
-  assert.equal(broaden.response.status, 200, "Unknown OAuth scopes are normalized away at the public boundary; granted scope must remain bounded.");
-  assert.equal(broaden.body.scope, "bridge:read offline_access");
-  const rotatedRefresh = broaden.body.refresh_token;
-  assert.notEqual(rotatedRefresh, refreshToken);
+  assert.equal((await refresh({ refreshToken, clientId: client.clientId, scope: "bridge:read offline_access admin" })).response.status, 400);
+  const narrowed = await refresh({ refreshToken, clientId: client.clientId, scope: "bridge:read" });
+  assert.equal(narrowed.response.status, 200);
+  assert.equal(narrowed.body.scope, "bridge:read");
+  assert.equal(narrowed.body.refresh_token, undefined);
   assert.equal((await refresh({ refreshToken, clientId: client.clientId })).response.status, 400);
 
   // A stale authorization code must fail after pairing generation rotation; old pairing code must fail, new succeeds.
