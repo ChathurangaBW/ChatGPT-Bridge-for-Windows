@@ -94,6 +94,6 @@ jobs:
           name: chatgpt-bridge-windows-0.2.0
           path: |
             artifacts/ChatGPTBridge.exe
-            artifacts/chatgpt-bridge-vscode-0.1.0.vsix
+            artifacts/chatgpt-bridge-vscode-0.2.0.vsix
             artifacts/cloud-worker/**
           if-no-files-found: error
