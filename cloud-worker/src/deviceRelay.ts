@@ -1,17 +1,44 @@
 import { DurableObject } from "cloudflare:workers";
-import { RELAY_TIMEOUT_MS, type CloudMcpRequest, type CloudMcpResponse } from "./protocol.js";
+import { randomId } from "./crypto.js";
+import { MAX_MCP_BODY_BYTES, RELAY_TIMEOUT_MS, type CloudMcpRequest, type CloudMcpResponse } from "./protocol.js";
 
 interface Env {}
 
 interface SocketAttachment {
   deviceId: string;
+  connectionId: string;
   connectedAt: number;
 }
 
 interface PendingRequest {
+  socket: WebSocket;
   resolve: (response: CloudMcpResponse) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+}
+
+const MAX_RESPONSE_HEADERS = 32;
+const MAX_HEADER_CHARS = 4096;
+
+function bodyBytes(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function socketAttachment(socket: WebSocket): SocketAttachment | null {
+  try {
+    const value = socket.deserializeAttachment() as Partial<SocketAttachment> | null;
+    if (
+      !value ||
+      typeof value.deviceId !== "string" ||
+      typeof value.connectionId !== "string" ||
+      typeof value.connectedAt !== "number"
+    ) {
+      return null;
+    }
+    return value as SocketAttachment;
+  } catch {
+    return null;
+  }
 }
 
 function parseMcpResponse(message: string): CloudMcpResponse | null {
@@ -20,10 +47,28 @@ function parseMcpResponse(message: string): CloudMcpResponse | null {
     if (
       value.type !== "mcp_response" ||
       typeof value.requestId !== "string" ||
+      value.requestId.length === 0 ||
+      value.requestId.length > 200 ||
       typeof value.status !== "number" ||
+      !Number.isInteger(value.status) ||
+      value.status < 100 ||
+      value.status > 599 ||
       typeof value.body !== "string" ||
+      bodyBytes(value.body) > MAX_MCP_BODY_BYTES ||
       !value.headers ||
       typeof value.headers !== "object"
+    ) {
+      return null;
+    }
+    const entries = Object.entries(value.headers);
+    if (
+      entries.length > MAX_RESPONSE_HEADERS ||
+      entries.some(([name, headerValue]) =>
+        name.length === 0 ||
+        name.length > 128 ||
+        typeof headerValue !== "string" ||
+        headerValue.length > MAX_HEADER_CHARS
+      )
     ) {
       return null;
     }
@@ -47,6 +92,7 @@ export class DeviceRelay extends DurableObject<Env> {
     if (!deviceId || deviceId !== this.ctx.id.name) return new Response("Device identity mismatch", { status: 403 });
 
     for (const existing of this.ctx.getWebSockets()) {
+      this.rejectPendingForSocket(existing, "Windows bridge connection was replaced while an MCP call was in flight.");
       try {
         existing.close(4001, "Replaced by a newer bridge connection");
       } catch {
@@ -58,18 +104,22 @@ export class DeviceRelay extends DurableObject<Env> {
     const client = pair[0];
     const server = pair[1];
     this.ctx.acceptWebSocket(server);
-    const attachment: SocketAttachment = { deviceId, connectedAt: Date.now() };
+    const attachment: SocketAttachment = {
+      deviceId,
+      connectionId: randomId("conn"),
+      connectedAt: Date.now(),
+    };
     server.serializeAttachment(attachment);
     server.send(JSON.stringify({ type: "agent_ready", deviceId }));
     return new Response(null, { status: 101, webSocket: client });
   }
 
   async isConnected(): Promise<boolean> {
-    return this.ctx.getWebSockets().some((socket) => socket.readyState === WebSocket.OPEN);
+    return Boolean(this.activeSocket());
   }
 
   async forwardMcp(request: CloudMcpRequest): Promise<CloudMcpResponse> {
-    const socket = this.ctx.getWebSockets().find((candidate) => candidate.readyState === WebSocket.OPEN);
+    const socket = this.activeSocket();
     if (!socket) throw new Error("The paired Windows bridge is offline.");
     if (this.pending.has(request.requestId)) throw new Error("Duplicate relay request ID.");
 
@@ -78,7 +128,7 @@ export class DeviceRelay extends DurableObject<Env> {
         this.pending.delete(request.requestId);
         reject(new Error("Timed out waiting for the Windows bridge."));
       }, RELAY_TIMEOUT_MS);
-      this.pending.set(request.requestId, { resolve, reject, timer });
+      this.pending.set(request.requestId, { socket, resolve, reject, timer });
       try {
         socket.send(JSON.stringify(request));
       } catch (error) {
@@ -89,12 +139,12 @@ export class DeviceRelay extends DurableObject<Env> {
     });
   }
 
-  async webSocketMessage(_socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
+  async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
     if (typeof message !== "string") return;
     const response = parseMcpResponse(message);
     if (!response) return;
     const pending = this.pending.get(response.requestId);
-    if (!pending) return;
+    if (!pending || pending.socket !== socket) return;
     clearTimeout(pending.timer);
     this.pending.delete(response.requestId);
     pending.resolve(response);
@@ -106,17 +156,28 @@ export class DeviceRelay extends DurableObject<Env> {
     } catch {
       // Cloudflare may already have completed the close handshake.
     }
-    if (this.ctx.getWebSockets().some((candidate) => candidate.readyState === WebSocket.OPEN)) return;
-    this.rejectPending("Windows bridge disconnected while an MCP call was in flight.");
+    this.rejectPendingForSocket(socket, "Windows bridge disconnected while an MCP call was in flight.");
   }
 
-  async webSocketError(_socket: WebSocket, error: unknown): Promise<void> {
+  async webSocketError(socket: WebSocket, error: unknown): Promise<void> {
     console.error("Device WebSocket error", error);
-    this.rejectPending("Windows bridge WebSocket failed while an MCP call was in flight.");
+    this.rejectPendingForSocket(socket, "Windows bridge WebSocket failed while an MCP call was in flight.");
   }
 
-  private rejectPending(message: string): void {
+  private activeSocket(): WebSocket | undefined {
+    let selected: { socket: WebSocket; connectedAt: number } | undefined;
+    for (const socket of this.ctx.getWebSockets()) {
+      if (socket.readyState !== WebSocket.OPEN) continue;
+      const attachment = socketAttachment(socket);
+      const connectedAt = attachment?.connectedAt ?? 0;
+      if (!selected || connectedAt >= selected.connectedAt) selected = { socket, connectedAt };
+    }
+    return selected?.socket;
+  }
+
+  private rejectPendingForSocket(socket: WebSocket, message: string): void {
     for (const [requestId, pending] of this.pending) {
+      if (pending.socket !== socket) continue;
       clearTimeout(pending.timer);
       pending.reject(new Error(message));
       this.pending.delete(requestId);
