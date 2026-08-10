@@ -88,8 +88,14 @@ export interface CloudAgentReady {
 export function normalizeScope(raw: string | null | undefined): string {
   const requested = new Set((raw ?? MCP_SCOPE).split(/\s+/).filter(Boolean));
   requested.add(MCP_SCOPE);
-  const allowed = [MCP_SCOPE, OFFLINE_SCOPE];
-  return allowed.filter((scope) => requested.has(scope)).join(" ");
+  const ordered: string[] = [];
+  for (const scope of [MCP_SCOPE, OFFLINE_SCOPE]) {
+    if (requested.delete(scope)) ordered.push(scope);
+  }
+  // Preserve unknown scopes so the authorization/refresh boundary can reject
+  // broadening attempts instead of silently dropping them.
+  ordered.push(...[...requested].sort());
+  return ordered.join(" ");
 }
 
 export function hasRequiredScope(scope: string): boolean {
