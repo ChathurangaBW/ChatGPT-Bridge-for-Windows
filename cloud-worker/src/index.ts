@@ -165,9 +165,9 @@ function authorizationPage(params: AuthorizeParams, pairingCode: string, error?:
 <style>
 body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;max-width:560px;margin:64px auto;padding:0 20px;color:#171717}main{border:1px solid #ddd;border-radius:14px;padding:28px}label{display:block;font-weight:650;margin:20px 0 8px}input[type=text]{box-sizing:border-box;width:100%;font:600 22px ui-monospace,Consolas,monospace;letter-spacing:.08em;padding:12px;border:1px solid #aaa;border-radius:8px;text-transform:uppercase}button{margin-top:18px;width:100%;padding:12px;border:0;border-radius:8px;background:#111;color:#fff;font-weight:650;font-size:16px}.error{background:#fff0f0;border:1px solid #e7aaaa;padding:10px;border-radius:8px}p{line-height:1.5;color:#444}</style>
 </head>
-<body><main><h1>Connect ChatGPT Bridge</h1><p>Enter the pairing code shown by <strong>ChatGPTBridge.exe</strong> on this PC. This authorizes ChatGPT to use only the paired Windows bridge.</p>
+<body><main><h1>Connect ChatGPT Bridge</h1><p>Enter the pairing code shown by the <strong>ChatGPT Bridge VS Code extension</strong>. This authorizes ChatGPT to use only the paired VS Code workspace.</p>
 ${error ? `<div class="error">${escapeHtml(error)}</div>` : ""}
-<form method="post" action="/authorize">${hiddenFields}<label for="pairing_code">Pairing code</label><input id="pairing_code" name="pairing_code" type="text" autocomplete="one-time-code" spellcheck="false" value="${escapeHtml(pairingCode)}" placeholder="ABCD-EFGH-JKLM" required><button type="submit">Authorize this PC</button></form></main></body></html>`);
+<form method="post" action="/authorize">${hiddenFields}<label for="pairing_code">Pairing code</label><input id="pairing_code" name="pairing_code" type="text" autocomplete="one-time-code" spellcheck="false" value="${escapeHtml(pairingCode)}" placeholder="ABCD-EFGH-JKLM" required><button type="submit">Authorize this VS Code</button></form></main></body></html>`);
 }
 
 async function handleRegister(request: Request, env: Env): Promise<Response> {
@@ -374,12 +374,7 @@ async function handleMcp(request: Request, origin: string, env: Env): Promise<Re
     const value = request.headers.get(name);
     if (value && value.length <= 4096) headers[name] = value;
   }
-  if (request.method === "POST") {
-    // The local MCP transport follows the spec strictly and requires both media types.
-    // Normalize the trusted internal hop so ChatGPT tool discovery remains compatible
-    // even when the public caller sends a narrower HTTP Accept value.
-    headers.accept = MCP_POST_ACCEPT;
-  }
+  if (request.method === "POST") headers.accept = MCP_POST_ACCEPT;
   const relayRequest: CloudMcpRequest = {
     type: "mcp_request",
     requestId: randomId("rpc"),
@@ -403,7 +398,7 @@ async function handleMcp(request: Request, origin: string, env: Env): Promise<Re
     return json(
       {
         jsonrpc: "2.0",
-        error: { code: -32001, message: error instanceof Error ? error.message : "Windows bridge unavailable." },
+        error: { code: -32001, message: error instanceof Error ? error.message : "VS Code bridge unavailable." },
         id: null,
       },
       503,
@@ -412,7 +407,7 @@ async function handleMcp(request: Request, origin: string, env: Env): Promise<Re
 }
 
 function pairingInfoPage(code: string): Response {
-  return html(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ChatGPT Bridge Pairing</title></head><body><main style="font-family:system-ui;max-width:560px;margin:64px auto;padding:20px"><h1>ChatGPT Bridge pairing</h1><p>Pairing code:</p><p style="font:700 28px ui-monospace,Consolas,monospace">${escapeHtml(code)}</p><p>In ChatGPT, connect the ChatGPT Bridge app. When the authorization page opens, enter this code. No OpenAI API key is required on this PC.</p></main></body></html>`);
+  return html(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ChatGPT Bridge Pairing</title></head><body><main style="font-family:system-ui;max-width:560px;margin:64px auto;padding:20px"><h1>ChatGPT Bridge pairing</h1><p>Pairing code:</p><p style="font:700 28px ui-monospace,Consolas,monospace">${escapeHtml(code)}</p><p>In ChatGPT, connect the ChatGPT Bridge app. When the authorization page opens, enter this code. No OpenAI API key is required in VS Code.</p></main></body></html>`);
 }
 
 export default {
