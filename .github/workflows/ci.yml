@@ -40,6 +40,49 @@ jobs:
       - name: Dependency audit
         run: npm audit --audit-level=moderate
       - run: npm run qa
+      - name: Smoke cloud OAuth and MCP relay
+        shell: pwsh
+        run: |
+          $stdout = Join-Path $env:RUNNER_TEMP "cloud-worker.out.log"
+          $stderr = Join-Path $env:RUNNER_TEMP "cloud-worker.err.log"
+          $worker = Start-Process -FilePath "npm.cmd" -ArgumentList @(
+            "run", "dev", "--workspace", "cloud-worker", "--", "--port", "8787"
+          ) -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 60; $i++) {
+              Start-Sleep -Milliseconds 500
+              if ($worker.HasExited) {
+                Get-Content $stdout -ErrorAction SilentlyContinue
+                Get-Content $stderr -ErrorAction SilentlyContinue
+                throw "Wrangler dev exited before /health became ready (exit code $($worker.ExitCode))."
+              }
+              try {
+                $health = Invoke-RestMethod -Uri "http://127.0.0.1:8787/health" -TimeoutSec 1
+                if ($health.ok -eq $true) {
+                  $ready = $true
+                  break
+                }
+              } catch {
+                # workerd may still be starting.
+              }
+            }
+            if (-not $ready) {
+              Get-Content $stdout -ErrorAction SilentlyContinue
+              Get-Content $stderr -ErrorAction SilentlyContinue
+              throw "Cloud Worker did not expose /health within the smoke-test window."
+            }
+            npm run smoke --workspace cloud-worker
+            if ($LASTEXITCODE -ne 0) {
+              Get-Content $stdout -ErrorAction SilentlyContinue
+              Get-Content $stderr -ErrorAction SilentlyContinue
+              throw "Cloud relay runtime smoke failed."
+            }
+          } finally {
+            if (-not $worker.HasExited) {
+              Stop-Process -Id $worker.Id -Force
+            }
+          }
       - name: Package release artifacts
         run: npm run package:release
       - name: Smoke packaged bridge executable
