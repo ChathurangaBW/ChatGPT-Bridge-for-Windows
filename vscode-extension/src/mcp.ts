@@ -1,122 +1,36 @@
-import { realpath, readFile, stat } from "node:fs/promises";
-import path from "node:path";
+import { realpath } from "node:fs/promises";
 import * as vscode from "vscode";
+import {
+  MAX_DIAGNOSTICS,
+  MAX_DIAGNOSTIC_MESSAGE_BYTES,
+  MAX_DIAGNOSTIC_SOURCE_BYTES,
+  MAX_FILE_BYTES,
+  MAX_SEARCH_FILES,
+  MAX_SEARCH_RESULTS,
+  MAX_SELECTION_BYTES,
+  SEARCH_EXCLUDE,
+  canonicalWorkspaceFile,
+  normalizeFsPath,
+  readWorkspaceText,
+  resolveWorkspacePath,
+  sanitizeDiagnosticCode,
+  truncateUtf8,
+} from "./workspaceSecurity.js";
+import {
+  handleMcpRequestCore,
+  type CloudMcpRequest,
+  type CloudMcpResponse,
+} from "./mcpProtocol.js";
 
-const PROTOCOL_2026 = "2026-07-28";
-const PROTOCOL_2025 = "2025-11-25";
-const MAX_FILE_BYTES = 1024 * 1024;
-const MAX_SEARCH_FILES = 5000;
-const MAX_SEARCH_RESULTS = 100;
-const SEARCH_EXCLUDE = "**/{node_modules,.git,dist,build,out,coverage,.next,.cache,vendor}/**";
+export type { CloudMcpRequest, CloudMcpResponse } from "./mcpProtocol.js";
 
-export interface CloudMcpRequest {
-  type: "mcp_request";
-  requestId: string;
-  method: "POST" | "DELETE";
-  headers: Record<string, string>;
-  body: string;
-}
-
-export interface CloudMcpResponse {
-  type: "mcp_response";
-  requestId: string;
-  status: number;
-  headers: Record<string, string>;
-  body: string;
-}
-
-interface JsonRpcRequest {
-  jsonrpc?: unknown;
-  id?: unknown;
-  method?: unknown;
-  params?: unknown;
-}
-
-interface ToolDefinition {
-  name: string;
-  title: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-  annotations: {
-    readOnlyHint: true;
-    destructiveHint: false;
-    openWorldHint: false;
+function toolResult(data: unknown, isError = false): Record<string, unknown> {
+  return {
+    resultType: "complete",
+    content: [{ type: "text", text: typeof data === "string" ? data : JSON.stringify(data, null, 2) }],
+    ...(typeof data === "object" && data !== null ? { structuredContent: data } : {}),
+    ...(isError ? { isError: true } : {}),
   };
-}
-
-const READ_ONLY = { readOnlyHint: true, destructiveHint: false, openWorldHint: false } as const;
-const EMPTY_SCHEMA = { type: "object", properties: {}, additionalProperties: false };
-
-const TOOLS: ToolDefinition[] = [
-  {
-    name: "get_workspace",
-    title: "Get VS Code workspace",
-    description: "Get the currently open VS Code workspace folders and active workspace file.",
-    inputSchema: EMPTY_SCHEMA,
-    annotations: READ_ONLY,
-  },
-  {
-    name: "get_active_editor",
-    title: "Get active VS Code editor",
-    description: "Read the active workspace editor and its live unsaved buffer. Files outside the workspace are withheld.",
-    inputSchema: EMPTY_SCHEMA,
-    annotations: READ_ONLY,
-  },
-  {
-    name: "get_selection",
-    title: "Get VS Code selection",
-    description: "Read the current selection in the active workspace editor. Files outside the workspace are withheld.",
-    inputSchema: EMPTY_SCHEMA,
-    annotations: READ_ONLY,
-  },
-  {
-    name: "get_diagnostics",
-    title: "Get VS Code diagnostics",
-    description: "Get current errors, warnings, information, and hints for files inside the open workspace.",
-    inputSchema: EMPTY_SCHEMA,
-    annotations: READ_ONLY,
-  },
-  {
-    name: "read_file",
-    title: "Read workspace file",
-    description: "Read an existing UTF-8 text file inside an open VS Code workspace folder.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        path: { type: "string", minLength: 1, description: "Absolute workspace path, or a relative path unique across workspace folders." },
-        startLine: { type: "integer", minimum: 1 },
-        endLine: { type: "integer", minimum: 1 },
-      },
-      required: ["path"],
-      additionalProperties: false,
-    },
-    annotations: READ_ONLY,
-  },
-  {
-    name: "search_workspace",
-    title: "Search VS Code workspace",
-    description: "Literal case-insensitive text search across bounded UTF-8 files in the open workspace.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        query: { type: "string", minLength: 1, maxLength: 500 },
-        maxResults: { type: "integer", minimum: 1, maximum: MAX_SEARCH_RESULTS, default: 30 },
-      },
-      required: ["query"],
-      additionalProperties: false,
-    },
-    annotations: READ_ONLY,
-  },
-];
-
-function normalizeFsPath(value: string): string {
-  const resolved = path.resolve(value);
-  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
-}
-
-function isInside(root: string, target: string): boolean {
-  const relative = path.relative(root, target);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 async function workspaceRoots(): Promise<string[]> {
@@ -138,75 +52,29 @@ async function workspaceRoots(): Promise<string[]> {
   return roots;
 }
 
-async function canonicalWorkspaceFile(file: string, roots?: string[]): Promise<string | null> {
-  const workspace = roots ?? (await workspaceRoots());
-  try {
-    const canonical = await realpath(file);
-    const targetKey = normalizeFsPath(canonical);
-    return workspace.some((root) => isInside(normalizeFsPath(root), targetKey)) ? canonical : null;
-  } catch {
-    return null;
-  }
-}
-
-async function resolveWorkspacePath(input: string, roots: string[]): Promise<string> {
-  if (path.isAbsolute(input)) {
-    const canonical = await canonicalWorkspaceFile(input, roots);
-    if (!canonical) throw new Error("The requested path is outside the open VS Code workspace or does not exist.");
-    return canonical;
-  }
-
-  const matches = new Map<string, string>();
-  for (const root of roots) {
-    const candidate = await canonicalWorkspaceFile(path.join(root, input), roots);
-    if (candidate) matches.set(normalizeFsPath(candidate), candidate);
-  }
-  if (matches.size === 0) throw new Error("The requested relative path was not found inside the open workspace.");
-  if (matches.size > 1) throw new Error("The requested relative path is ambiguous across multiple workspace folders. Use an absolute path.");
-  return [...matches.values()][0]!;
-}
-
-async function readWorkspaceText(file: string): Promise<string> {
-  const info = await stat(file);
-  if (!info.isFile()) throw new Error("The requested path is not a regular file.");
-  if (info.size > MAX_FILE_BYTES) throw new Error(`File exceeds the ${MAX_FILE_BYTES} byte read limit.`);
-  const bytes = await readFile(file);
-  if (bytes.includes(0)) throw new Error("Binary-looking files are not exposed.");
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    throw new Error("File is not valid UTF-8 text.");
-  }
-}
-
-function toolResult(data: unknown, isError = false): Record<string, unknown> {
-  return {
-    resultType: "complete",
-    content: [{ type: "text", text: typeof data === "string" ? data : JSON.stringify(data, null, 2) }],
-    ...(typeof data === "object" && data !== null ? { structuredContent: data } : {}),
-    ...(isError ? { isError: true } : {}),
-  };
+async function activeWorkspaceFile(roots: string[]): Promise<string | null> {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.document.uri.scheme !== "file") return null;
+  return canonicalWorkspaceFile(editor.document.uri.fsPath, roots);
 }
 
 async function activeEditorView(): Promise<Record<string, unknown>> {
   const roots = await workspaceRoots();
   const editor = vscode.window.activeTextEditor;
   if (!editor || editor.document.uri.scheme !== "file") {
-    return { activeFile: null, languageId: null, dirty: false, content: null, restricted: false };
+    return { activeFile: null, languageId: null, dirty: false, content: null, contentTruncated: false, restricted: false };
   }
   const activeFile = await canonicalWorkspaceFile(editor.document.uri.fsPath, roots);
   if (!activeFile) {
-    return { activeFile: null, languageId: null, dirty: false, content: null, restricted: true };
+    return { activeFile: null, languageId: null, dirty: false, content: null, contentTruncated: false, restricted: true };
   }
-  const content = editor.document.getText();
-  const bytes = Buffer.byteLength(content, "utf8");
-  const exposed = bytes <= MAX_FILE_BYTES ? content : Buffer.from(content, "utf8").subarray(0, MAX_FILE_BYTES).toString("utf8");
+  const content = truncateUtf8(editor.document.getText(), MAX_FILE_BYTES);
   return {
     activeFile,
     languageId: editor.document.languageId,
     dirty: editor.document.isDirty,
-    content: exposed,
-    contentTruncated: bytes > MAX_FILE_BYTES,
+    content: content.text,
+    contentTruncated: content.truncated,
     restricted: false,
   };
 }
@@ -214,17 +82,21 @@ async function activeEditorView(): Promise<Record<string, unknown>> {
 async function getSelection(): Promise<Record<string, unknown>> {
   const roots = await workspaceRoots();
   const editor = vscode.window.activeTextEditor;
-  if (!editor || editor.document.uri.scheme !== "file") return { activeFile: null, selection: null, restricted: false };
+  if (!editor || editor.document.uri.scheme !== "file") {
+    return { activeFile: null, selection: null, restricted: false };
+  }
   const activeFile = await canonicalWorkspaceFile(editor.document.uri.fsPath, roots);
   if (!activeFile) return { activeFile: null, selection: null, restricted: true };
-  const value = editor.document.getText(editor.selection);
+
+  const value = truncateUtf8(editor.document.getText(editor.selection), MAX_SELECTION_BYTES);
   return {
     activeFile,
     selection: {
-      text: value,
+      text: value.text,
       start: { line: editor.selection.start.line, character: editor.selection.start.character },
       end: { line: editor.selection.end.line, character: editor.selection.end.character },
       isEmpty: editor.selection.isEmpty,
+      truncated: value.truncated,
     },
     restricted: false,
   };
@@ -233,30 +105,27 @@ async function getSelection(): Promise<Record<string, unknown>> {
 async function getDiagnostics(): Promise<Record<string, unknown>> {
   const roots = await workspaceRoots();
   const diagnostics: Array<Record<string, unknown>> = [];
-  let truncated = false;
   for (const [uri, values] of vscode.languages.getDiagnostics()) {
     if (uri.scheme !== "file") continue;
     const file = await canonicalWorkspaceFile(uri.fsPath, roots);
     if (!file) continue;
     for (const item of values) {
+      const rawCode = typeof item.code === "object" && item.code !== null ? item.code.value : item.code;
       diagnostics.push({
         file,
-        message: item.message.slice(0, 4096),
+        message: truncateUtf8(item.message, MAX_DIAGNOSTIC_MESSAGE_BYTES).text,
         severity: ["error", "warning", "information", "hint"][item.severity] ?? "hint",
-        source: item.source?.slice(0, 256),
-        code: typeof item.code === "object" ? item.code.value : item.code,
+        source: item.source ? truncateUtf8(item.source, MAX_DIAGNOSTIC_SOURCE_BYTES).text : undefined,
+        code: sanitizeDiagnosticCode(rawCode),
         range: {
           start: { line: item.range.start.line, character: item.range.start.character },
           end: { line: item.range.end.line, character: item.range.end.character },
         },
       });
-      if (diagnostics.length >= 500) {
-        truncated = true;
-        return { diagnostics, truncated };
-      }
+      if (diagnostics.length >= MAX_DIAGNOSTICS) return { diagnostics, truncated: true };
     }
   }
-  return { diagnostics, truncated };
+  return { diagnostics, truncated: false };
 }
 
 async function searchWorkspace(query: string, maxResults: number): Promise<Record<string, unknown>> {
@@ -280,6 +149,7 @@ async function searchWorkspace(query: string, maxResults: number): Promise<Recor
     const key = normalizeFsPath(file);
     if (seen.has(key)) continue;
     seen.add(key);
+
     let content: string;
     try {
       content = await readWorkspaceText(file);
@@ -288,18 +158,19 @@ async function searchWorkspace(query: string, maxResults: number): Promise<Recor
     }
     filesScanned += 1;
     const lines = content.split(/\r?\n/);
-    for (let i = 0; i < lines.length; i += 1) {
-      const column = lines[i]!.toLowerCase().indexOf(needle);
+    for (let index = 0; index < lines.length; index += 1) {
+      const column = lines[index]!.toLowerCase().indexOf(needle);
       if (column < 0) continue;
-      matches.push({ path: file, line: i + 1, column: column + 1, preview: lines[i]!.slice(0, 500) });
+      matches.push({
+        path: file,
+        line: index + 1,
+        column: column + 1,
+        preview: truncateUtf8(lines[index]!, 500).text,
+      });
       if (matches.length >= maxResults) return { query, matches, filesScanned, truncated: true };
     }
   }
   return { query, matches, filesScanned, truncated: candidates.length >= MAX_SEARCH_FILES };
-}
-
-function objectParams(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
 async function callTool(name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -307,8 +178,11 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<Re
     switch (name) {
       case "get_workspace": {
         const roots = await workspaceRoots();
-        const active = await activeEditorView();
-        return toolResult({ vscodeConnected: true, workspaceFolders: roots, activeFile: active.activeFile ?? null });
+        return toolResult({
+          vscodeConnected: true,
+          workspaceFolders: roots,
+          activeFile: await activeWorkspaceFile(roots),
+        });
       }
       case "get_active_editor":
         return toolResult(await activeEditorView());
@@ -318,22 +192,36 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<Re
         return toolResult(await getDiagnostics());
       case "read_file": {
         if (typeof args.path !== "string" || args.path.length === 0) return toolResult("path is required.", true);
+        if (args.startLine !== undefined && (typeof args.startLine !== "number" || !Number.isInteger(args.startLine) || args.startLine < 1)) {
+          return toolResult("startLine must be a positive integer.", true);
+        }
+        if (args.endLine !== undefined && (typeof args.endLine !== "number" || !Number.isInteger(args.endLine) || args.endLine < 1)) {
+          return toolResult("endLine must be a positive integer.", true);
+        }
         const roots = await workspaceRoots();
         const file = await resolveWorkspacePath(args.path, roots);
         const content = await readWorkspaceText(file);
         const lines = content.split(/\r?\n/);
-        const start = typeof args.startLine === "number" && Number.isInteger(args.startLine) && args.startLine > 0 ? args.startLine : 1;
+        const start = typeof args.startLine === "number" ? args.startLine : 1;
         if (start > lines.length) return toolResult(`startLine ${start} exceeds the file length of ${lines.length} lines.`, true);
-        const end = typeof args.endLine === "number" && Number.isInteger(args.endLine) && args.endLine > 0 ? args.endLine : lines.length;
+        const end = typeof args.endLine === "number" ? args.endLine : lines.length;
         if (end < start) return toolResult("endLine must be greater than or equal to startLine.", true);
         const clampedEnd = Math.min(end, lines.length);
-        return toolResult({ path: file, startLine: start, endLine: clampedEnd, content: lines.slice(start - 1, clampedEnd).join("\n") });
+        return toolResult({
+          path: file,
+          startLine: start,
+          endLine: clampedEnd,
+          content: lines.slice(start - 1, clampedEnd).join("\n"),
+        });
       }
       case "search_workspace": {
-        if (typeof args.query !== "string" || args.query.length === 0 || args.query.length > 500) return toolResult("query must contain 1 to 500 characters.", true);
-        const maxResults = typeof args.maxResults === "number" && Number.isInteger(args.maxResults)
-          ? Math.min(MAX_SEARCH_RESULTS, Math.max(1, args.maxResults))
-          : 30;
+        if (typeof args.query !== "string" || args.query.length === 0 || args.query.length > 500) {
+          return toolResult("query must contain 1 to 500 characters.", true);
+        }
+        if (args.maxResults !== undefined && (typeof args.maxResults !== "number" || !Number.isInteger(args.maxResults) || args.maxResults < 1 || args.maxResults > MAX_SEARCH_RESULTS)) {
+          return toolResult(`maxResults must be an integer from 1 to ${MAX_SEARCH_RESULTS}.`, true);
+        }
+        const maxResults = typeof args.maxResults === "number" ? args.maxResults : 30;
         return toolResult(await searchWorkspace(args.query, maxResults));
       }
       default:
@@ -344,69 +232,6 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<Re
   }
 }
 
-function rpcResponse(id: unknown, result: unknown): string {
-  return JSON.stringify({ jsonrpc: "2.0", id: id ?? null, result });
-}
-
-function rpcError(id: unknown, code: number, message: string): string {
-  return JSON.stringify({ jsonrpc: "2.0", id: id ?? null, error: { code, message } });
-}
-
 export async function handleMcpRequest(request: CloudMcpRequest): Promise<CloudMcpResponse> {
-  const headers = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };
-  if (request.method === "DELETE") return { type: "mcp_response", requestId: request.requestId, status: 204, headers, body: "" };
-
-  let parsed: JsonRpcRequest;
-  try {
-    parsed = JSON.parse(request.body) as JsonRpcRequest;
-  } catch {
-    return { type: "mcp_response", requestId: request.requestId, status: 400, headers, body: rpcError(null, -32700, "Parse error") };
-  }
-  if (parsed.jsonrpc !== "2.0" || typeof parsed.method !== "string") {
-    return { type: "mcp_response", requestId: request.requestId, status: 400, headers, body: rpcError(parsed.id, -32600, "Invalid Request") };
-  }
-
-  const protocolVersion = request.headers["mcp-protocol-version"];
-  const routedMethod = request.headers["mcp-method"];
-  if (protocolVersion === PROTOCOL_2026 && routedMethod !== parsed.method) {
-    return { type: "mcp_response", requestId: request.requestId, status: 400, headers, body: rpcError(parsed.id, -32020, "Mcp-Method does not match the JSON-RPC method.") };
-  }
-
-  const params = objectParams(parsed.params);
-  let result: unknown;
-  switch (parsed.method) {
-    case "server/discover":
-      result = {
-        resultType: "complete",
-        supportedVersions: [PROTOCOL_2026, PROTOCOL_2025],
-        capabilities: { tools: {} },
-        serverInfo: { name: "chatgpt-bridge-vscode", version: "0.2.0" },
-        instructions: "Read-only access to the currently focused VS Code workspace. Files outside the open workspace are withheld.",
-      };
-      break;
-    case "initialize": {
-      const requested = typeof params.protocolVersion === "string" ? params.protocolVersion : PROTOCOL_2025;
-      result = { protocolVersion: requested.startsWith("2025-") ? requested : PROTOCOL_2025, capabilities: { tools: {} }, serverInfo: { name: "chatgpt-bridge-vscode", version: "0.2.0" } };
-      break;
-    }
-    case "notifications/initialized":
-      return { type: "mcp_response", requestId: request.requestId, status: 202, headers, body: "" };
-    case "tools/list":
-      result = { resultType: "complete", tools: TOOLS, ttlMs: 300_000, cacheScope: "public" };
-      break;
-    case "tools/call": {
-      const name = typeof params.name === "string" ? params.name : "";
-      if (!name) return { type: "mcp_response", requestId: request.requestId, status: 400, headers, body: rpcError(parsed.id, -32602, "Tool name is required.") };
-      if (protocolVersion === PROTOCOL_2026) {
-        const routedName = request.headers["mcp-name"];
-        if (routedName !== name) return { type: "mcp_response", requestId: request.requestId, status: 400, headers, body: rpcError(parsed.id, -32020, "Mcp-Name does not match the requested tool.") };
-      }
-      result = await callTool(name, objectParams(params.arguments));
-      break;
-    }
-    default:
-      return { type: "mcp_response", requestId: request.requestId, status: 404, headers, body: rpcError(parsed.id, -32601, "Method not found") };
-  }
-
-  return { type: "mcp_response", requestId: request.requestId, status: 200, headers, body: rpcResponse(parsed.id, result) };
+  return handleMcpRequestCore(request, callTool);
 }
