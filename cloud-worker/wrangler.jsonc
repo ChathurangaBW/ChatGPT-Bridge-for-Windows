@@ -1,0 +1,32 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "lucky-heart-f5b9",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-08",
+  "workers_dev": true,
+  "observability": {
+    "enabled": true
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CONTROL",
+        "class_name": "ControlPlane"
+      },
+      {
+        "name": "DEVICES",
+        "class_name": "DeviceRelay"
+      }
+    ]
+  },
+  "exports": {
+    "ControlPlane": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "DeviceRelay": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  }
+}
