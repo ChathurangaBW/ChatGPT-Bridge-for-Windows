@@ -12,12 +12,14 @@ export interface DeviceRecord {
   secretHash: string;
   createdAt: number;
   pairedAt?: number;
+  pairingGeneration: number;
   currentPairingCode?: string;
   pairingExpiresAt?: number;
 }
 
 export interface PairingRecord {
   deviceId: string;
+  pairingGeneration: number;
   expiresAt: number;
 }
 
@@ -32,6 +34,7 @@ export interface AuthorizationCodeRecord {
   clientId: string;
   redirectUri: string;
   deviceId: string;
+  pairingGeneration: number;
   codeChallenge: string;
   scope: string;
   resource: string;
