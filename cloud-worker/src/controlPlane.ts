@@ -66,7 +66,8 @@ interface RegistrationRate {
   count: number;
 }
 
-const MAX_REGISTRATIONS_PER_HOUR_PER_IP = 20;
+const MAX_DEVICE_REGISTRATIONS_PER_HOUR_PER_IP = 20;
+const MAX_CLIENT_REGISTRATIONS_PER_HOUR_PER_IP = 100;
 
 function deviceKey(deviceId: string): string {
   return `device:${deviceId}`;
@@ -92,8 +93,8 @@ function refreshKey(hash: string): string {
   return `refresh:${hash}`;
 }
 
-async function rateKey(ip: string): Promise<string> {
-  return `rate:register:${await sha256(ip || "unknown")}`;
+async function rateKey(kind: string, ip: string): Promise<string> {
+  return `rate:${kind}:${await sha256(ip || "unknown")}`;
 }
 
 function scopeIsSubset(requested: string, granted: string): boolean {
@@ -103,16 +104,8 @@ function scopeIsSubset(requested: string, granted: string): boolean {
 
 export class ControlPlane extends DurableObject<Env> {
   async registerDevice(origin: string, ip: string): Promise<DeviceRegistration> {
+    await this.consumeHourlyRate("device", ip, MAX_DEVICE_REGISTRATIONS_PER_HOUR_PER_IP);
     const now = Date.now();
-    const currentHour = Math.floor(now / 3_600_000);
-    const key = await rateKey(ip);
-    const existingRate = await this.ctx.storage.get<RegistrationRate>(key);
-    const count = existingRate?.hour === currentHour ? existingRate.count : 0;
-    if (count >= MAX_REGISTRATIONS_PER_HOUR_PER_IP) {
-      throw new Error("Too many device registrations from this address. Try again later.");
-    }
-    await this.ctx.storage.put(key, { hour: currentHour, count: count + 1 } satisfies RegistrationRate);
-
     const deviceId = randomId("dev");
     const deviceSecret = randomToken();
     const secretHash = await sha256(deviceSecret);
@@ -147,10 +140,16 @@ export class ControlPlane extends DurableObject<Env> {
     if (!(await this.verifyDevice(deviceId, deviceSecret))) throw new Error("Invalid device credential.");
     const record = await this.ctx.storage.get<DeviceRecord>(deviceKey(deviceId));
     if (!record) throw new Error("Unknown device.");
-    const paired = Boolean(record.pairedAt);
-    if (paired) return { paired: true };
+
+    if (record.currentPairingCode && (!record.pairingExpiresAt || record.pairingExpiresAt <= Date.now())) {
+      await this.ctx.storage.delete(pairKey(record.currentPairingCode));
+      delete record.currentPairingCode;
+      delete record.pairingExpiresAt;
+      await this.ctx.storage.put(deviceKey(deviceId), record);
+    }
+
     return {
-      paired: false,
+      paired: Boolean(record.pairedAt),
       ...(record.currentPairingCode ? { pairingCode: record.currentPairingCode } : {}),
       ...(record.pairingExpiresAt ? { pairingExpiresAt: record.pairingExpiresAt } : {}),
     };
@@ -160,17 +159,17 @@ export class ControlPlane extends DurableObject<Env> {
     if (!(await this.verifyDevice(deviceId, deviceSecret))) throw new Error("Invalid device credential.");
     const record = await this.ctx.storage.get<DeviceRecord>(deviceKey(deviceId));
     if (!record) throw new Error("Unknown device.");
-    if (record.pairedAt) return { paired: true };
 
     if (record.currentPairingCode) await this.ctx.storage.delete(pairKey(record.currentPairingCode));
     const pairing = await this.createPairing(deviceId, Date.now());
     record.currentPairingCode = pairing.pairingCode;
     record.pairingExpiresAt = pairing.pairingExpiresAt;
     await this.ctx.storage.put(deviceKey(deviceId), record);
-    return { paired: false, ...pairing };
+    return { paired: Boolean(record.pairedAt), ...pairing };
   }
 
-  async registerClient(input: RegisterClientInput): Promise<OAuthClientRecord> {
+  async registerClient(input: RegisterClientInput, ip = "unknown"): Promise<OAuthClientRecord> {
+    await this.consumeHourlyRate("oauth-client", ip, MAX_CLIENT_REGISTRATIONS_PER_HOUR_PER_IP);
     if (input.redirectUris.length === 0 || input.redirectUris.length > 20) throw new Error("redirect_uris is required.");
     for (const uri of input.redirectUris) {
       const parsed = new URL(uri);
@@ -210,12 +209,14 @@ export class ControlPlane extends DurableObject<Env> {
     }
 
     const device = await this.ctx.storage.get<DeviceRecord>(deviceKey(pairing.deviceId));
-    if (!device || device.currentPairingCode !== pairingCode) throw new Error("Pairing code is no longer active.");
-
-    await this.ctx.storage.delete(pairKey(pairingCode));
-    delete device.currentPairingCode;
-    delete device.pairingExpiresAt;
-    await this.ctx.storage.put(deviceKey(device.deviceId), device);
+    if (
+      !device ||
+      device.currentPairingCode !== pairingCode ||
+      !device.pairingExpiresAt ||
+      device.pairingExpiresAt <= Date.now()
+    ) {
+      throw new Error("Pairing code is no longer active.");
+    }
 
     const code = randomToken();
     const record: AuthorizationCodeRecord = {
@@ -326,5 +327,14 @@ export class ControlPlane extends DurableObject<Env> {
       expiresIn: Math.floor(ACCESS_TOKEN_TTL_MS / 1000),
       scope,
     };
+  }
+
+  private async consumeHourlyRate(kind: string, ip: string, max: number): Promise<void> {
+    const currentHour = Math.floor(Date.now() / 3_600_000);
+    const key = await rateKey(kind, ip);
+    const existing = await this.ctx.storage.get<RegistrationRate>(key);
+    const count = existing?.hour === currentHour ? existing.count : 0;
+    if (count >= max) throw new Error("Too many registration requests from this address. Try again later.");
+    await this.ctx.storage.put(key, { hour: currentHour, count: count + 1 } satisfies RegistrationRate);
   }
 }
