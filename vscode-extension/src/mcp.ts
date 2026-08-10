@@ -17,6 +17,7 @@ import {
   sanitizeDiagnosticCode,
   selectLineRange,
   truncateUtf8,
+  type SearchMatch,
 } from "./workspaceSecurity.js";
 import {
   handleMcpRequestCore,
@@ -141,7 +142,7 @@ async function searchWorkspace(query: string, maxResults: number): Promise<Recor
     remainingFiles = Math.max(0, MAX_SEARCH_FILES - candidates.length);
   }
 
-  const matches: Array<Record<string, unknown>> = [];
+  const matches: SearchMatch[] = [];
   const seen = new Set<string>();
   let filesScanned = 0;
   for (const uri of candidates.slice(0, MAX_SEARCH_FILES)) {
