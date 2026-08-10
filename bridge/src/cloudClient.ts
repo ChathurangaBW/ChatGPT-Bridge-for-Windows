@@ -7,8 +7,20 @@ import {
 } from "./cloudCredentials.js";
 
 const MAX_RELAY_BODY_BYTES = 6 * 1024 * 1024;
-const REQUEST_HEADERS = new Set(["content-type", "accept", "mcp-protocol-version", "mcp-session-id", "last-event-id"]);
+const MCP_POST_ACCEPT = "application/json, text/event-stream";
+const STATIC_REQUEST_HEADERS = new Set([
+  "content-type",
+  "accept",
+  "mcp-protocol-version",
+  "mcp-session-id",
+  "last-event-id",
+  "mcp-method",
+  "mcp-name",
+]);
 const RESPONSE_HEADERS = ["content-type", "mcp-session-id", "cache-control"];
+const MAX_RELAY_HEADERS = 48;
+const MAX_HEADER_NAME_CHARS = 128;
+const MAX_HEADER_VALUE_CHARS = 4096;
 const PAIRING_REFRESH_INTERVAL_MS = 15_000;
 const PAIRING_REFRESH_EARLY_MS = 0;
 const CLOUD_HTTP_TIMEOUT_MS = 15_000;
@@ -47,6 +59,12 @@ interface CloudMcpResponse {
   body: string;
 }
 
+interface JsonRpcHints {
+  method?: string;
+  name?: string;
+  protocolVersion?: string;
+}
+
 function bodyBytes(value: string): number {
   return Buffer.byteLength(value, "utf8");
 }
@@ -64,6 +82,77 @@ function isMcpRequest(value: unknown): value is CloudMcpRequest {
     item.headers !== null &&
     typeof item.headers === "object"
   );
+}
+
+function isSafeAsciiHeaderValue(value: string): boolean {
+  return value.length > 0 && value.length <= MAX_HEADER_VALUE_CHARS && /^[\x20-\x7e]+$/.test(value);
+}
+
+function isAllowedRequestHeader(name: string): boolean {
+  if (STATIC_REQUEST_HEADERS.has(name)) return true;
+  return (
+    name.startsWith("mcp-param-") &&
+    name.length > "mcp-param-".length &&
+    name.length <= MAX_HEADER_NAME_CHARS
+  );
+}
+
+function parseJsonRpcHints(body: string): JsonRpcHints {
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const value = parsed as { method?: unknown; params?: unknown };
+    const params = value.params && typeof value.params === "object" && !Array.isArray(value.params)
+      ? (value.params as Record<string, unknown>)
+      : null;
+    const meta = params?._meta && typeof params._meta === "object" && !Array.isArray(params._meta)
+      ? (params._meta as Record<string, unknown>)
+      : null;
+    const principal = typeof params?.name === "string"
+      ? params.name
+      : typeof params?.uri === "string"
+        ? params.uri
+        : undefined;
+    const protocolVersion = typeof meta?.["io.modelcontextprotocol/protocolVersion"] === "string"
+      ? (meta["io.modelcontextprotocol/protocolVersion"] as string)
+      : undefined;
+    return {
+      ...(typeof value.method === "string" ? { method: value.method } : {}),
+      ...(principal ? { name: principal } : {}),
+      ...(protocolVersion ? { protocolVersion } : {}),
+    };
+  } catch {
+    return {};
+  }
+}
+
+function localMcpHeaders(request: CloudMcpRequest): Headers {
+  const headers = new Headers();
+  let count = 0;
+  for (const [name, value] of Object.entries(request.headers)) {
+    const normalized = name.toLowerCase();
+    if (!isAllowedRequestHeader(normalized)) continue;
+    if (normalized.length > MAX_HEADER_NAME_CHARS || typeof value !== "string" || value.length > MAX_HEADER_VALUE_CHARS) continue;
+    count += 1;
+    if (count > MAX_RELAY_HEADERS) break;
+    headers.set(normalized, value);
+  }
+
+  if (request.method === "POST") {
+    const hints = parseJsonRpcHints(request.body);
+    if (!headers.has("mcp-method") && hints.method && isSafeAsciiHeaderValue(hints.method)) {
+      headers.set("mcp-method", hints.method);
+    }
+    if (!headers.has("mcp-name") && hints.name && isSafeAsciiHeaderValue(hints.name)) {
+      headers.set("mcp-name", hints.name);
+    }
+    if (!headers.has("mcp-protocol-version") && hints.protocolVersion && isSafeAsciiHeaderValue(hints.protocolVersion)) {
+      headers.set("mcp-protocol-version", hints.protocolVersion);
+    }
+    headers.set("accept", MCP_POST_ACCEPT);
+    headers.set("content-type", "application/json");
+  }
+  return headers;
 }
 
 async function jsonRequest<T>(url: string, init: RequestInit): Promise<T> {
@@ -174,14 +263,7 @@ async function relayToLocalMcp(request: CloudMcpRequest, mcpPort: number): Promi
     };
   }
 
-  const headers = new Headers();
-  for (const [name, value] of Object.entries(request.headers)) {
-    const normalized = name.toLowerCase();
-    if (REQUEST_HEADERS.has(normalized) && typeof value === "string" && value.length <= 4096) {
-      headers.set(normalized, value);
-    }
-  }
-  if (request.method === "POST" && !headers.has("content-type")) headers.set("content-type", "application/json");
+  const headers = localMcpHeaders(request);
 
   try {
     const response = await fetch(`http://127.0.0.1:${mcpPort}/mcp`, {
