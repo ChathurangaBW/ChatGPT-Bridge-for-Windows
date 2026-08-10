@@ -135,6 +135,29 @@ jobs:
               if ($text -match $pattern) { throw "Forbidden release marker '$pattern' found in $($file.FullName)." }
             }
           }
+      - name: Smoke clean VS Code profile install and uninstall
+        shell: pwsh
+        run: |
+          $code = Get-Command code -ErrorAction SilentlyContinue
+          if (-not $code) { throw "VS Code CLI is not available on the Windows release runner." }
+          $userData = Join-Path $env:RUNNER_TEMP "bridge-vscode-user"
+          $extensions = Join-Path $env:RUNNER_TEMP "bridge-vscode-extensions"
+          New-Item -ItemType Directory -Force -Path $userData, $extensions | Out-Null
+          $vsix = (Resolve-Path ".\artifacts\chatgpt-bridge-vscode-0.2.0.vsix").Path
+
+          & $code.Source --user-data-dir $userData --extensions-dir $extensions --install-extension $vsix --force
+          if ($LASTEXITCODE -ne 0) { throw "VSIX install into clean VS Code profile failed." }
+          $installed = & $code.Source --user-data-dir $userData --extensions-dir $extensions --list-extensions --show-versions
+          if ($LASTEXITCODE -ne 0 -or $installed -notcontains "chathurangabw.chatgpt-bridge-vscode@0.2.0") {
+            throw "Installed extension/version was not found in the clean VS Code profile."
+          }
+
+          & $code.Source --user-data-dir $userData --extensions-dir $extensions --uninstall-extension chathurangabw.chatgpt-bridge-vscode
+          if ($LASTEXITCODE -ne 0) { throw "VSIX uninstall from clean VS Code profile failed." }
+          $remaining = & $code.Source --user-data-dir $userData --extensions-dir $extensions --list-extensions --show-versions
+          if ($remaining -contains "chathurangabw.chatgpt-bridge-vscode@0.2.0") {
+            throw "Extension remained installed after uninstall."
+          }
       - name: Export VSIX release artifact
         uses: actions/upload-artifact@v7
         with:
