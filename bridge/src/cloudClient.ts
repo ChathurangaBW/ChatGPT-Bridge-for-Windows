@@ -8,6 +8,8 @@ import {
 
 const MAX_RELAY_BODY_BYTES = 6 * 1024 * 1024;
 const RESPONSE_HEADERS = ["content-type", "mcp-session-id", "cache-control"];
+const PAIRING_REFRESH_INTERVAL_MS = 60_000;
+const PAIRING_REFRESH_EARLY_MS = 60_000;
 
 interface RegistrationResponse {
   deviceId: string;
@@ -107,6 +109,28 @@ async function deviceRequest<T>(
   });
 }
 
+async function ensurePairing(
+  baseUrl: string,
+  credentials: CloudDeviceCredentials,
+  existingStatus?: DeviceStatusResponse,
+): Promise<{ credentials: CloudDeviceCredentials; status: DeviceStatusResponse; changed: boolean }> {
+  let status = existingStatus ?? (await deviceRequest<DeviceStatusResponse>(baseUrl, credentials, "/device/status", "GET"));
+  const currentCode = status.pairingCode;
+  const currentExpiry = status.pairingExpiresAt;
+  if (!currentCode || !currentExpiry || currentExpiry <= Date.now() + PAIRING_REFRESH_EARLY_MS) {
+    status = await deviceRequest<DeviceStatusResponse>(baseUrl, credentials, "/device/pairing", "POST");
+  }
+
+  const changed = status.pairingCode !== credentials.pairingCode || status.pairingExpiresAt !== credentials.pairingExpiresAt;
+  const updated: CloudDeviceCredentials = {
+    ...credentials,
+    ...(status.pairingCode ? { pairingCode: status.pairingCode } : {}),
+    ...(status.pairingExpiresAt ? { pairingExpiresAt: status.pairingExpiresAt } : {}),
+  };
+  if (changed) await saveCloudCredentials(updated);
+  return { credentials: updated, status, changed };
+}
+
 async function ensureDevice(baseUrl: string): Promise<{ credentials: CloudDeviceCredentials; status: DeviceStatusResponse }> {
   let credentials = await loadCloudCredentials(baseUrl);
   if (!credentials) credentials = await registerDevice(baseUrl);
@@ -120,24 +144,16 @@ async function ensureDevice(baseUrl: string): Promise<{ credentials: CloudDevice
     status = await deviceRequest<DeviceStatusResponse>(baseUrl, credentials, "/device/status", "GET");
   }
 
-  if (!status.paired && (!status.pairingCode || !status.pairingExpiresAt || status.pairingExpiresAt <= Date.now() + 30_000)) {
-    status = await deviceRequest<DeviceStatusResponse>(baseUrl, credentials, "/device/pairing", "POST");
-  }
+  const pairing = await ensurePairing(baseUrl, credentials, status);
+  return { credentials: pairing.credentials, status: pairing.status };
+}
 
-  if (!status.paired) {
-    credentials = {
-      ...credentials,
-      ...(status.pairingCode ? { pairingCode: status.pairingCode } : {}),
-      ...(status.pairingExpiresAt ? { pairingExpiresAt: status.pairingExpiresAt } : {}),
-    };
-    await saveCloudCredentials(credentials);
-  } else if (credentials.pairingCode || credentials.pairingExpiresAt) {
-    const { pairingCode: _pairingCode, pairingExpiresAt: _pairingExpiresAt, ...pairedCredentials } = credentials;
-    credentials = pairedCredentials;
-    await saveCloudCredentials(credentials);
-  }
-
-  return { credentials, status };
+function printPairing(baseUrl: string, credentials: CloudDeviceCredentials, paired: boolean): void {
+  if (paired) console.log(`Cloud device:     authorized before (${credentials.deviceId})`);
+  if (!credentials.pairingCode) return;
+  console.log(`Cloud pairing:    ${credentials.pairingCode}`);
+  console.log(`Pairing page:     ${baseUrl}/pair/${encodeURIComponent(credentials.pairingCode)}`);
+  console.log("                   In ChatGPT, connect the app and enter this code when authorization opens.");
 }
 
 async function relayToLocalMcp(request: CloudMcpRequest, mcpPort: number): Promise<CloudMcpResponse> {
@@ -214,14 +230,8 @@ export async function startCloudRelayClient(mcpPort: number): Promise<CloudRelay
   const run = async (): Promise<void> => {
     while (!stopped) {
       try {
-        const { credentials, status } = await ensureDevice(config.baseUrl);
-        if (!status.paired && credentials.pairingCode) {
-          console.log(`Cloud pairing:    ${credentials.pairingCode}`);
-          console.log(`Pairing page:     ${config.baseUrl}/pair/${encodeURIComponent(credentials.pairingCode)}`);
-          console.log("                   Connect the ChatGPT app, then enter this code on the authorization page.");
-        } else if (status.paired) {
-          console.log(`Cloud device:     paired (${credentials.deviceId})`);
-        }
+        let { credentials, status } = await ensureDevice(config.baseUrl);
+        printPairing(config.baseUrl, credentials, status.paired);
 
         const socket = new WebSocket(websocketUrl(config.baseUrl, credentials.deviceId), {
           headers: { authorization: `Bearer ${credentials.deviceSecret}` },
@@ -231,10 +241,20 @@ export async function startCloudRelayClient(mcpPort: number): Promise<CloudRelay
 
         await new Promise<void>((resolve, reject) => {
           let opened = false;
+          let pairingTimer: ReturnType<typeof setInterval> | null = null;
           socket.once("open", () => {
             opened = true;
             reconnectDelayMs = 1_000;
             console.log(`Cloud relay:      connected to ${config.baseUrl}`);
+            pairingTimer = setInterval(() => {
+              void ensurePairing(config.baseUrl, credentials)
+                .then((pairing) => {
+                  if (pairing.changed) printPairing(config.baseUrl, pairing.credentials, pairing.status.paired);
+                  credentials = pairing.credentials;
+                  status = pairing.status;
+                })
+                .catch((error) => console.error("Cloud pairing refresh failed:", error instanceof Error ? error.message : error));
+            }, PAIRING_REFRESH_INTERVAL_MS);
           });
           socket.on("message", (raw) => {
             let message: unknown;
@@ -248,7 +268,10 @@ export async function startCloudRelayClient(mcpPort: number): Promise<CloudRelay
               if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(response));
             });
           });
-          socket.once("close", () => resolve());
+          socket.once("close", () => {
+            if (pairingTimer) clearInterval(pairingTimer);
+            resolve();
+          });
           socket.once("error", (error) => {
             if (!opened) reject(error);
           });
