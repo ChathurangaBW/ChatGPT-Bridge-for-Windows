@@ -42,7 +42,9 @@ export function activate(context: vscode.ExtensionContext): void {
   const actions: SetupPanelActions = {
     copyPairingCode: () => client.copyPairingCode(),
     openPairingPage: () => client.openPairingPage(),
-    openChatGPT: () => vscode.env.openExternal(vscode.Uri.parse(CHATGPT_PLUGINS_URL)),
+    openChatGPT: async () => {
+      await vscode.env.openExternal(vscode.Uri.parse(CHATGPT_PLUGINS_URL));
+    },
     retryConnection: () => {
       output.appendLine(`[${new Date().toISOString()}] manual retry requested`);
       client.stop();
