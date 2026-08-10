@@ -70,7 +70,18 @@ jobs:
             }
           }
       - name: Package single VSIX release
-        run: npm run package:release
+        shell: pwsh
+        run: |
+          Remove-Item ".\artifacts" -Recurse -Force -ErrorAction SilentlyContinue
+          npm run package:release
+          if ($LASTEXITCODE -ne 0) { throw "VSIX release packaging failed." }
+          $files = @(Get-ChildItem ".\artifacts" -File -Recurse)
+          if ($files.Count -ne 1) {
+            throw "Release output must contain exactly one file; found $($files.Count)."
+          }
+          if ($files[0].Name -ne "chatgpt-bridge-vscode-0.2.0.vsix") {
+            throw "Unexpected release artifact: $($files[0].FullName)"
+          }
       - name: Smoke packaged VSIX
         shell: pwsh
         run: |
@@ -86,17 +97,84 @@ jobs:
           Expand-Archive -Path $zip -DestinationPath $temp -Force
 
           $packagePath = Join-Path $temp "extension\package.json"
+          $manifestPath = Join-Path $temp "extension.vsixmanifest"
           $bundlePath = Join-Path $temp "extension\dist\extension.js"
-          if (-not (Test-Path $packagePath)) { throw "VSIX package.json is missing." }
-          if (-not (Test-Path $bundlePath)) { throw "VSIX extension bundle is missing." }
+          $readmePath = Join-Path $temp "extension\readme.md"
+          foreach ($required in @($packagePath, $manifestPath, $bundlePath, $readmePath)) {
+            if (-not (Test-Path $required)) { throw "Required VSIX entry is missing: $required" }
+          }
+
           $package = Get-Content $packagePath -Raw | ConvertFrom-Json
           if ($package.version -ne "0.2.0") { throw "Unexpected VSIX package version: $($package.version)" }
+          if ($package.publisher -ne "chathurangabw") { throw "Unexpected VSIX publisher: $($package.publisher)" }
+          if ($package.main -ne "./dist/extension.js") { throw "Unexpected VSIX entry point: $($package.main)" }
           if ($package.description -match "local ChatGPT Bridge service") { throw "VSIX still advertises the removed local companion service." }
+
           $bundle = Get-Content $bundlePath -Raw
           if ($bundle -notmatch "lucky-heart-f5b9\.chatgpt-bridge\.workers\.dev") { throw "VSIX bundle does not contain the production cloud relay endpoint." }
-          if ($bundle -match "ws://127\.0\.0\.1:47321") { throw "VSIX bundle still contains the removed localhost WebSocket bridge endpoint." }
+          if ($bundle -notmatch "wss:") { throw "VSIX bundle does not contain secure WebSocket relay handling." }
+
           $exe = Get-ChildItem $temp -Recurse -Filter "*.exe" -ErrorAction SilentlyContinue
           if ($exe) { throw "VSIX unexpectedly contains an executable." }
+
+          $textFiles = Get-ChildItem $temp -Recurse -File | Where-Object { $_.Extension -in @(".js", ".json", ".md", ".xml", ".vsixmanifest") }
+          $forbiddenPatterns = @(
+            "ChatGPTBridge\.exe",
+            "ws://127\.0\.0\.1",
+            "http://127\.0\.0\.1",
+            "localhost:47321",
+            "localhost:47322",
+            "OPENAI_API_KEY",
+            "CLOUDFLARE_API_TOKEN",
+            "-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----",
+            "sk-[A-Za-z0-9_-]{20,}"
+          )
+          foreach ($file in $textFiles) {
+            $text = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
+            foreach ($pattern in $forbiddenPatterns) {
+              if ($text -match $pattern) { throw "Forbidden release marker '$pattern' found in $($file.FullName)." }
+            }
+          }
+      - name: Smoke clean VS Code profile install and uninstall
+        shell: pwsh
+        run: |
+          $codePath = (Get-Command code -ErrorAction SilentlyContinue)?.Source
+          if (-not $codePath) {
+            $choco = Get-Command choco -ErrorAction SilentlyContinue
+            if (-not $choco) { throw "Neither VS Code CLI nor Chocolatey is available on the Windows release runner." }
+            & $choco.Source install vscode -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "Unable to install VS Code for the clean-profile release smoke." }
+            foreach ($candidate in @(
+              "C:\Program Files\Microsoft VS Code\bin\code.cmd",
+              "C:\Program Files\Microsoft VS Code\bin\code.exe",
+              "$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd"
+            )) {
+              if (Test-Path $candidate) {
+                $codePath = $candidate
+                break
+              }
+            }
+          }
+          if (-not $codePath) { throw "VS Code CLI could not be resolved after installation." }
+
+          $userData = Join-Path $env:RUNNER_TEMP "bridge-vscode-user"
+          $extensions = Join-Path $env:RUNNER_TEMP "bridge-vscode-extensions"
+          New-Item -ItemType Directory -Force -Path $userData, $extensions | Out-Null
+          $vsix = (Resolve-Path ".\artifacts\chatgpt-bridge-vscode-0.2.0.vsix").Path
+
+          & $codePath --user-data-dir $userData --extensions-dir $extensions --install-extension $vsix --force
+          if ($LASTEXITCODE -ne 0) { throw "VSIX install into clean VS Code profile failed." }
+          $installed = @(& $codePath --user-data-dir $userData --extensions-dir $extensions --list-extensions --show-versions)
+          if ($LASTEXITCODE -ne 0 -or $installed -notcontains "chathurangabw.chatgpt-bridge-vscode@0.2.0") {
+            throw "Installed extension/version was not found in the clean VS Code profile."
+          }
+
+          & $codePath --user-data-dir $userData --extensions-dir $extensions --uninstall-extension chathurangabw.chatgpt-bridge-vscode
+          if ($LASTEXITCODE -ne 0) { throw "VSIX uninstall from clean VS Code profile failed." }
+          $remaining = @(& $codePath --user-data-dir $userData --extensions-dir $extensions --list-extensions --show-versions)
+          if ($remaining -contains "chathurangabw.chatgpt-bridge-vscode@0.2.0") {
+            throw "Extension remained installed after uninstall."
+          }
       - name: Export VSIX release artifact
         uses: actions/upload-artifact@v7
         with:

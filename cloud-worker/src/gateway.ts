@@ -20,6 +20,8 @@ const MCP_POST_ACCEPT = "application/json, text/event-stream";
 const MAX_FORWARDED_HEADERS = 48;
 const MAX_HEADER_NAME_CHARS = 128;
 const MAX_HEADER_VALUE_CHARS = 4096;
+const MAX_OAUTH_BODY_BYTES = 64 * 1024;
+const MAX_DEVICE_CONTROL_BODY_BYTES = 1024;
 const STATIC_REQUEST_HEADERS = new Set([
   "content-type",
   "accept",
@@ -50,14 +52,8 @@ function bearerToken(request: Request): string | null {
   return match?.[1] ?? null;
 }
 
-function unauthorized(origin: string): Response {
-  return json(
-    { error: "authorization_required" },
-    401,
-    {
-      "www-authenticate": `Bearer realm="chatgpt-bridge", resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp", scope="${MCP_SCOPE}"`,
-    },
-  );
+function mediaType(request: Request): string {
+  return (request.headers.get("content-type") ?? "").split(";", 1)[0]?.trim().toLowerCase() ?? "";
 }
 
 async function readBoundedText(request: Request, maxBytes: number): Promise<string> {
@@ -66,9 +62,44 @@ async function readBoundedText(request: Request, maxBytes: number): Promise<stri
     const size = Number(declared);
     if (Number.isFinite(size) && size > maxBytes) throw new Error("request_body_too_large");
   }
-  const text = await request.text();
-  if (new TextEncoder().encode(text).byteLength > maxBytes) throw new Error("request_body_too_large");
-  return text;
+  if (!request.body) return "";
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel("request_body_too_large");
+        throw new Error("request_body_too_large");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+function unauthorized(origin: string): Response {
+  return json(
+    { error: "authorization_required" },
+    401,
+    {
+      "www-authenticate": `Bearer realm="chatgpt-bridge", resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp", scope="${MCP_SCOPE}"`,
+    },
+  );
 }
 
 function parseJsonRpcHints(body: string): JsonRpcHints {
@@ -110,8 +141,7 @@ function isSafeAsciiHeaderValue(value: string): boolean {
 }
 
 function isAllowedRequestHeader(name: string): boolean {
-  if (STATIC_REQUEST_HEADERS.has(name)) return true;
-  return name.startsWith("mcp-param-") && name.length > "mcp-param-".length && name.length <= MAX_HEADER_NAME_CHARS;
+  return STATIC_REQUEST_HEADERS.has(name) || name.startsWith("mcp-param-");
 }
 
 function collectRelayHeaders(request: Request, hints: JsonRpcHints): Record<string, string> | Response {
@@ -120,7 +150,13 @@ function collectRelayHeaders(request: Request, hints: JsonRpcHints): Record<stri
   for (const [rawName, value] of request.headers) {
     const name = rawName.toLowerCase();
     if (!isAllowedRequestHeader(name)) continue;
-    if (name.length > MAX_HEADER_NAME_CHARS || value.length > MAX_HEADER_VALUE_CHARS) continue;
+
+    if (name.length > MAX_HEADER_NAME_CHARS || value.length > MAX_HEADER_VALUE_CHARS) {
+      return json({ error: "MCP forwarding header exceeds the configured size limit." }, 431);
+    }
+    if (name.startsWith("mcp-param-") && name.length === "mcp-param-".length) {
+      return json({ error: "Malformed MCP parameter header." }, 400);
+    }
     count += 1;
     if (count > MAX_FORWARDED_HEADERS) return json({ error: "Too many MCP forwarding headers." }, 431);
     headers[name] = value;
@@ -130,13 +166,17 @@ function collectRelayHeaders(request: Request, hints: JsonRpcHints): Record<stri
   if (suppliedMethod && hints.method && suppliedMethod !== hints.method) {
     return headerMismatch(hints.id, "Header mismatch: Mcp-Method does not match the JSON-RPC method.");
   }
+  const suppliedName = headers["mcp-name"];
+  if (suppliedName && hints.name && suppliedName !== hints.name) {
+    return headerMismatch(hints.id, "Header mismatch: Mcp-Name does not match the JSON-RPC request principal.");
+  }
   const suppliedVersion = headers["mcp-protocol-version"];
   if (suppliedVersion && hints.protocolVersion && suppliedVersion !== hints.protocolVersion) {
     return headerMismatch(hints.id, "Header mismatch: MCP-Protocol-Version does not match the request _meta envelope.");
   }
 
   if (!suppliedMethod && hints.method && isSafeAsciiHeaderValue(hints.method)) headers["mcp-method"] = hints.method;
-  if (!headers["mcp-name"] && hints.name && isSafeAsciiHeaderValue(hints.name)) headers["mcp-name"] = hints.name;
+  if (!suppliedName && hints.name && isSafeAsciiHeaderValue(hints.name)) headers["mcp-name"] = hints.name;
   if (!suppliedVersion && hints.protocolVersion && isSafeAsciiHeaderValue(hints.protocolVersion)) {
     headers["mcp-protocol-version"] = hints.protocolVersion;
   }
@@ -150,9 +190,8 @@ async function handleMcp(request: Request, origin: string, env: Env): Promise<Re
     return new Response("Method not allowed", { status: 405, headers: { allow: "POST, DELETE" } });
   }
 
-  if (request.method === "POST") {
-    const mediaType = (request.headers.get("content-type") ?? "").split(";", 1)[0]?.trim().toLowerCase();
-    if (mediaType !== "application/json") return json({ error: "MCP POST requests must use application/json." }, 415);
+  if (request.method === "POST" && mediaType(request) !== "application/json") {
+    return json({ error: "MCP POST requests must use application/json." }, 415);
   }
 
   const token = bearerToken(request);
@@ -227,12 +266,48 @@ async function rewriteAuthorizeHtml(response: Response): Promise<Response> {
   return new Response(body, { status: response.status, headers: response.headers });
 }
 
+async function preflightBaseRoute(request: Request, pathname: string): Promise<Response | null> {
+  const method = request.method.toUpperCase();
+  let maxBytes: number | null = null;
+  let expectedType: string | null = null;
+  let requireEmpty = false;
+
+  if (pathname === "/register" && method === "POST") {
+    maxBytes = MAX_OAUTH_BODY_BYTES;
+    expectedType = "application/json";
+  } else if ((pathname === "/token" || pathname === "/authorize") && method === "POST") {
+    maxBytes = MAX_OAUTH_BODY_BYTES;
+    expectedType = "application/x-www-form-urlencoded";
+  } else if ((pathname === "/device/register" || pathname === "/device/pairing") && method === "POST") {
+    maxBytes = MAX_DEVICE_CONTROL_BODY_BYTES;
+    requireEmpty = true;
+  }
+
+  if (expectedType && mediaType(request) !== expectedType) {
+    return json({ error: `Expected Content-Type ${expectedType}.` }, 415);
+  }
+  if (maxBytes === null) return null;
+
+  let body: string;
+  try {
+    body = await readBoundedText(request.clone(), maxBytes);
+  } catch {
+    return json({ error: "Request body is too large." }, 413);
+  }
+  if (requireEmpty && body.trim().length > 0) return json({ error: "This endpoint does not accept a request body." }, 400);
+  return null;
+}
+
 const baseFetch = baseHandler.fetch as (request: Request, env: Env) => Promise<Response>;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/mcp") return handleMcp(request, url.origin, env);
+
+    const preflight = await preflightBaseRoute(request, url.pathname);
+    if (preflight) return preflight;
+
     const response = await baseFetch(request, env);
     if (url.pathname === "/authorize") return rewriteAuthorizeHtml(withIssuer(response, url.origin));
     return response;

@@ -28,6 +28,7 @@ interface AgentFocusMessage {
 const MAX_RESPONSE_HEADERS = 32;
 const MAX_HEADER_CHARS = 4096;
 const MAX_DEVICE_SOCKETS = 16;
+const MAX_PENDING_REQUESTS = 64;
 
 function bodyBytes(value: string): number {
   return new TextEncoder().encode(value).byteLength;
@@ -85,7 +86,8 @@ function parseMcpResponse(message: string): CloudMcpResponse | null {
       typeof value.body !== "string" ||
       bodyBytes(value.body) > MAX_MCP_BODY_BYTES ||
       !value.headers ||
-      typeof value.headers !== "object"
+      typeof value.headers !== "object" ||
+      Array.isArray(value.headers)
     ) {
       return null;
     }
@@ -139,12 +141,13 @@ export class DeviceRelay extends DurableObject<Env> {
     const client = pair[0];
     const server = pair[1];
     this.ctx.acceptWebSocket(server);
-    const now = Date.now();
     const attachment: SocketAttachment = {
       deviceId,
       connectionId: randomId("conn"),
-      connectedAt: now,
-      focusedAt: now,
+      connectedAt: Date.now(),
+      // A newly connected background window must not steal routing from a window
+      // that has explicitly announced focus. Zero means "never focused".
+      focusedAt: 0,
     };
     server.serializeAttachment(attachment);
     server.send(JSON.stringify({ type: "agent_ready", deviceId }));
@@ -159,6 +162,7 @@ export class DeviceRelay extends DurableObject<Env> {
     const socket = this.activeSocket();
     if (!socket) throw new Error("The paired VS Code extension is offline.");
     if (this.pending.has(request.requestId)) throw new Error("Duplicate relay request ID.");
+    if (this.pending.size >= MAX_PENDING_REQUESTS) throw new Error("Too many MCP requests are already in flight for this device.");
 
     return new Promise<CloudMcpResponse>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -186,6 +190,7 @@ export class DeviceRelay extends DurableObject<Env> {
       socket.serializeAttachment({
         ...attachment,
         windowId: focus.windowId,
+        // Use the relay clock rather than trusting a client-supplied timestamp.
         focusedAt: Date.now(),
       } satisfies SocketAttachment);
       return;

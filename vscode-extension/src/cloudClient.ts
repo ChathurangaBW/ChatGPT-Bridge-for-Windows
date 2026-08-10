@@ -1,8 +1,9 @@
-import { readFile } from "node:fs/promises";
+import { readFile, unlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import * as vscode from "vscode";
 import WebSocket from "ws";
+import { parseLegacyCredentials } from "./legacyCredentials.js";
 import { handleMcpRequest, type CloudMcpRequest } from "./mcp.js";
 
 const CLOUD_URL = "https://lucky-heart-f5b9.chatgpt-bridge.workers.dev";
@@ -47,14 +48,6 @@ interface DeviceStatusResponse {
   pairingExpiresAt?: number;
 }
 
-interface LegacyCredentialFile {
-  baseUrl?: unknown;
-  deviceId?: unknown;
-  deviceSecret?: unknown;
-  pairingCode?: unknown;
-  pairingExpiresAt?: unknown;
-}
-
 function websocketUrl(deviceId: string): string {
   const url = new URL(CLOUD_URL);
   url.protocol = "wss:";
@@ -69,7 +62,7 @@ function legacyCredentialPath(): string {
 }
 
 function isCloudMcpRequest(value: unknown): value is CloudMcpRequest {
-  if (!value || typeof value !== "object") return false;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const item = value as Partial<CloudMcpRequest>;
   return (
     item.type === "mcp_request" &&
@@ -78,8 +71,10 @@ function isCloudMcpRequest(value: unknown): value is CloudMcpRequest {
     item.requestId.length <= 200 &&
     (item.method === "POST" || item.method === "DELETE") &&
     typeof item.body === "string" &&
+    Buffer.byteLength(item.body, "utf8") <= MAX_MESSAGE_BYTES &&
     item.headers !== null &&
-    typeof item.headers === "object"
+    typeof item.headers === "object" &&
+    !Array.isArray(item.headers)
   );
 }
 
@@ -184,24 +179,17 @@ export class CloudExtensionClient implements vscode.Disposable {
   }
 
   private async migrateLegacyCredentials(): Promise<DeviceCredentials | null> {
+    const legacyPath = legacyCredentialPath();
     try {
-      const parsed = JSON.parse(await readFile(legacyCredentialPath(), "utf8")) as LegacyCredentialFile;
-      if (
-        parsed.baseUrl !== CLOUD_URL ||
-        typeof parsed.deviceId !== "string" ||
-        typeof parsed.deviceSecret !== "string" ||
-        parsed.deviceId.length === 0 ||
-        parsed.deviceSecret.length < 32
-      ) {
-        return null;
-      }
-      const credentials: DeviceCredentials = {
-        deviceId: parsed.deviceId,
-        deviceSecret: parsed.deviceSecret,
-        ...(typeof parsed.pairingCode === "string" ? { pairingCode: parsed.pairingCode } : {}),
-        ...(typeof parsed.pairingExpiresAt === "number" ? { pairingExpiresAt: parsed.pairingExpiresAt } : {}),
-      };
+      const credentials = parseLegacyCredentials(await readFile(legacyPath, "utf8"), CLOUD_URL);
+      if (!credentials) return null;
       await this.saveCredentials(credentials);
+      try {
+        await unlink(legacyPath);
+      } catch {
+        // Migration is complete once SecretStorage succeeds. Failure to delete the
+        // legacy file must not make the extension depend on that file again.
+      }
       return credentials;
     } catch {
       return null;
@@ -318,14 +306,15 @@ export class CloudExtensionClient implements vscode.Disposable {
       });
 
       socket.on("message", (raw) => {
-        if (Buffer.byteLength(raw.toString(), "utf8") > MAX_MESSAGE_BYTES) return;
+        const text = raw.toString("utf8");
+        if (Buffer.byteLength(text, "utf8") > MAX_MESSAGE_BYTES) return;
         let message: unknown;
         try {
-          message = JSON.parse(raw.toString("utf8"));
+          message = JSON.parse(text);
         } catch {
           return;
         }
-        if (message && typeof message === "object" && (message as { type?: unknown }).type === "agent_ready") {
+        if (message && typeof message === "object" && !Array.isArray(message) && (message as { type?: unknown }).type === "agent_ready") {
           this.setStatus({
             status: "connected",
             detail: status.paired ? "Connected and authorized." : "Connected. Pair ChatGPT using the displayed code.",
