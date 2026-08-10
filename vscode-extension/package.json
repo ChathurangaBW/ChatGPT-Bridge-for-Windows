@@ -38,6 +38,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit && esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node20 --external:vscode --outfile=dist/extension.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test test/**/*.test.ts",
     "package:vsix": "vsce package --no-dependencies --allow-missing-repository --out ../artifacts/chatgpt-bridge-vscode-0.2.0.vsix"
   },
   "devDependencies": {
