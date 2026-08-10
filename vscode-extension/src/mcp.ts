@@ -10,10 +10,12 @@ import {
   MAX_SELECTION_BYTES,
   SEARCH_EXCLUDE,
   canonicalWorkspaceFile,
+  findLiteralMatches,
   normalizeFsPath,
   readWorkspaceText,
   resolveWorkspacePath,
   sanitizeDiagnosticCode,
+  selectLineRange,
   truncateUtf8,
 } from "./workspaceSecurity.js";
 import {
@@ -131,17 +133,16 @@ async function getDiagnostics(): Promise<Record<string, unknown>> {
 async function searchWorkspace(query: string, maxResults: number): Promise<Record<string, unknown>> {
   const roots = await workspaceRoots();
   const candidates: vscode.Uri[] = [];
-  let remaining = MAX_SEARCH_FILES;
+  let remainingFiles = MAX_SEARCH_FILES;
   for (const folder of vscode.workspace.workspaceFolders ?? []) {
-    if (folder.uri.scheme !== "file" || remaining <= 0) continue;
-    const found = await vscode.workspace.findFiles(new vscode.RelativePattern(folder, "**/*"), SEARCH_EXCLUDE, remaining);
+    if (folder.uri.scheme !== "file" || remainingFiles <= 0) continue;
+    const found = await vscode.workspace.findFiles(new vscode.RelativePattern(folder, "**/*"), SEARCH_EXCLUDE, remainingFiles);
     candidates.push(...found);
-    remaining = Math.max(0, MAX_SEARCH_FILES - candidates.length);
+    remainingFiles = Math.max(0, MAX_SEARCH_FILES - candidates.length);
   }
 
   const matches: Array<Record<string, unknown>> = [];
   const seen = new Set<string>();
-  const needle = query.toLowerCase();
   let filesScanned = 0;
   for (const uri of candidates.slice(0, MAX_SEARCH_FILES)) {
     const file = await canonicalWorkspaceFile(uri.fsPath, roots);
@@ -157,18 +158,9 @@ async function searchWorkspace(query: string, maxResults: number): Promise<Recor
       continue;
     }
     filesScanned += 1;
-    const lines = content.split(/\r?\n/);
-    for (let index = 0; index < lines.length; index += 1) {
-      const column = lines[index]!.toLowerCase().indexOf(needle);
-      if (column < 0) continue;
-      matches.push({
-        path: file,
-        line: index + 1,
-        column: column + 1,
-        preview: truncateUtf8(lines[index]!, 500).text,
-      });
-      if (matches.length >= maxResults) return { query, matches, filesScanned, truncated: true };
-    }
+    const fileMatches = findLiteralMatches(file, content, query, maxResults - matches.length);
+    matches.push(...fileMatches);
+    if (matches.length >= maxResults) return { query, matches, filesScanned, truncated: true };
   }
   return { query, matches, filesScanned, truncated: candidates.length >= MAX_SEARCH_FILES };
 }
@@ -192,27 +184,15 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<Re
         return toolResult(await getDiagnostics());
       case "read_file": {
         if (typeof args.path !== "string" || args.path.length === 0) return toolResult("path is required.", true);
-        if (args.startLine !== undefined && (typeof args.startLine !== "number" || !Number.isInteger(args.startLine) || args.startLine < 1)) {
-          return toolResult("startLine must be a positive integer.", true);
-        }
-        if (args.endLine !== undefined && (typeof args.endLine !== "number" || !Number.isInteger(args.endLine) || args.endLine < 1)) {
-          return toolResult("endLine must be a positive integer.", true);
-        }
         const roots = await workspaceRoots();
         const file = await resolveWorkspacePath(args.path, roots);
         const content = await readWorkspaceText(file);
-        const lines = content.split(/\r?\n/);
-        const start = typeof args.startLine === "number" ? args.startLine : 1;
-        if (start > lines.length) return toolResult(`startLine ${start} exceeds the file length of ${lines.length} lines.`, true);
-        const end = typeof args.endLine === "number" ? args.endLine : lines.length;
-        if (end < start) return toolResult("endLine must be greater than or equal to startLine.", true);
-        const clampedEnd = Math.min(end, lines.length);
-        return toolResult({
-          path: file,
-          startLine: start,
-          endLine: clampedEnd,
-          content: lines.slice(start - 1, clampedEnd).join("\n"),
-        });
+        const range = selectLineRange(
+          content,
+          typeof args.startLine === "number" ? args.startLine : args.startLine === undefined ? undefined : Number.NaN,
+          typeof args.endLine === "number" ? args.endLine : args.endLine === undefined ? undefined : Number.NaN,
+        );
+        return toolResult({ path: file, ...range });
       }
       case "search_workspace": {
         if (typeof args.query !== "string" || args.query.length === 0 || args.query.length > 500) {
