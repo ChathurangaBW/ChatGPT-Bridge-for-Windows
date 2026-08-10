@@ -4,20 +4,42 @@ A VS Code extension that exposes the currently focused workspace to normal ChatG
 
 > **The VSIX is the only end-user package.** There is no companion EXE, localhost listener, OpenAI API key, ngrok tunnel, tunnel ID, or router configuration.
 
-> **v0.2 remains deliberately read-only.** It can inspect workspace/editor context, diagnostics, bounded UTF-8 files, and literal workspace search. It cannot edit files, execute shell commands, mutate Git, or run tests.
+> **v0.2 is read-only.** It can inspect workspace/editor context, diagnostics, bounded UTF-8 files, and literal workspace search. It cannot edit files, execute shell commands, mutate Git, or run tests.
+
+## User experience
+
+```text
+Install ChatGPT Bridge VSIX
+          ↓
+VS Code opens ChatGPT Bridge setup
+          ↓
+Extension connects to hosted relay automatically
+          ↓
+Open ChatGPT → Plugins → ChatGPT Bridge
+          ↓
+Enter the pairing code shown in VS Code
+          ↓
+Done — use normal ChatGPT with the open workspace
+```
+
+The VS Code setup panel shows relay status, pairing state, the current pairing code, retry controls, and one-click links for pairing/ChatGPT. After the first run, clicking **ChatGPT Bridge** in the status bar reopens the panel.
+
+When ChatGPT calls `get_workspace`, the app can render an inline **Live VS Code workspace** card showing the active file and workspace folders, with a **Refresh from VS Code** action.
 
 ## Architecture
 
 ```text
 VS Code + ChatGPT Bridge VSIX
-  ├─ encrypted device secret in VS Code SecretStorage
-  ├─ on-demand read-only MCP tools
-  ├─ canonical workspace privacy checks
+  ├─ device secret in VS Code SecretStorage
+  ├─ first-run setup/status UI
+  ├─ six on-demand read-only MCP tools
+  ├─ MCP Apps workspace-status UI resource
   └─ outbound authenticated WSS
              │
              ▼
 Cloudflare Worker + Durable Objects
   https://lucky-heart-f5b9.chatgpt-bridge.workers.dev
+  ├─ product + pairing pages
   ├─ OAuth / PKCE
   ├─ short-lived device pairing codes
   ├─ bearer-protected /mcp
@@ -31,6 +53,8 @@ The extension does **not** continuously upload editor snapshots. Workspace/edito
 
 ## MCP tools
 
+Exactly six workspace tools are exposed:
+
 - `get_workspace`
 - `get_active_editor`
 - `get_selection`
@@ -38,7 +62,7 @@ The extension does **not** continuously upload editor snapshots. Workspace/edito
 - `read_file`
 - `search_workspace`
 
-Active-editor and selection data is returned only when the file resolves canonically inside a currently open VS Code workspace root. File reads reject files outside the workspace, symlink escapes, binary-looking data, invalid UTF-8, and files over the configured read limit. Search is literal and bounded and skips common dependency/build directories.
+`get_workspace` is also linked to the ChatGPT workspace-status UI resource. No additional privileged UI tool is introduced.
 
 ## Install
 
@@ -48,7 +72,7 @@ A successful release build produces exactly one end-user package:
 chatgpt-bridge-vscode-0.2.0.vsix
 ```
 
-Install it using **VS Code → Extensions → … → Install from VSIX…**, then reload VS Code.
+Install it using **VS Code → Extensions → … → Install from VSIX…**, then reload VS Code. The setup panel opens automatically on first activation.
 
 From source:
 
@@ -60,38 +84,66 @@ code --install-extension .\artifacts\chatgpt-bridge-vscode-0.2.0.vsix
 
 There is no EXE to start.
 
-## Pair ChatGPT
+## Connect ChatGPT during development
 
-The public MCP endpoint is:
+The development MCP endpoint is:
 
 ```text
 https://lucky-heart-f5b9.chatgpt-bridge.workers.dev/mcp
 ```
 
-After installing the VSIX, run **ChatGPT Bridge: Show Status**. The extension automatically connects to the hosted relay. If the device is not yet authorized, the status bar shows a short pairing code.
+1. Enable ChatGPT **Developer mode**.
+2. Open **ChatGPT Plugins** and add a plugin.
+3. Use name **ChatGPT Bridge** and the MCP URL above.
+4. In VS Code run **ChatGPT Bridge: Open Setup** if the setup panel is not already visible.
+5. When ChatGPT opens the Bridge authorization page, enter the pairing code shown in VS Code.
+6. Enable ChatGPT Bridge in a normal conversation and ask about the current workspace.
 
-When ChatGPT opens the Bridge OAuth authorization page, enter that pairing code and approve the connection.
+Useful VS Code commands:
 
-The extension stores the device secret in VS Code `SecretStorage`. If an older EXE-based v0.2 installation is present, the extension can import its existing device credential once so the existing ChatGPT OAuth authorization can continue without the EXE.
-
-Useful commands:
-
+- **ChatGPT Bridge: Open Setup**
 - **ChatGPT Bridge: Show Status**
 - **ChatGPT Bridge: Copy Pairing Code**
 - **ChatGPT Bridge: Open Pairing Page**
 
+After an MCP, OAuth, or UI deployment changes, open the ChatGPT Bridge plugin entry in ChatGPT and select **Refresh** so ChatGPT reloads the latest metadata/resources.
+
 ## Multiple VS Code windows
 
-All VS Code windows for the same installation can share the paired device identity. Each window opens its own outbound relay socket. The Durable Object tracks focus events and sends ChatGPT MCP calls to the most recently focused VS Code window. In-flight requests are bound to the exact socket that received them so a stale/replaced window cannot answer a newer request.
+All VS Code windows for the same installation can share the paired device identity. Each window opens its own outbound relay socket. The relay sends ChatGPT MCP calls to the most recently focused VS Code window. In-flight requests remain associated with the exact socket that received them.
 
-## Cloud Worker
+## Cloud Worker operations
 
 The Cloudflare Worker is operator infrastructure, not an end-user package.
 
-Important routes:
+The preferred deployment path is the manual GitHub Actions workflow:
 
 ```text
+Actions → Deploy ChatGPT Bridge Worker → Run workflow
+```
+
+Choose **development** while the project is still being tested. The workflow:
+
+```text
+installs dependencies
+→ runs repository QA
+→ deploys the Worker
+→ waits for /health
+→ verifies the hosted product UI
+→ runs live OAuth/device/MCP smoke
+→ verifies the hosted authorization UI
+```
+
+This makes deployment status explicit and prevents source changes from silently getting ahead of the deployed Worker.
+
+Operator-only GitHub environment values are described in [`docs/OPERATIONS.md`](docs/OPERATIONS.md). They are deployment credentials and are never entered by VSIX users.
+
+Important Worker routes:
+
+```text
+GET  /
 GET  /health
+GET  /pair/<code>
 POST /device/register
 GET  /device/status
 POST /device/pairing
@@ -104,42 +156,6 @@ POST /authorize
 POST /token
 POST /mcp
 ```
-
-Operator deployment:
-
-```powershell
-npm ci
-npx wrangler login
-npm run deploy:cloud
-```
-
-## Security boundary
-
-### VS Code extension
-
-- No localhost server or open local port.
-- Device secret is stored with VS Code `SecretStorage`, not plaintext extension state.
-- Workspace data is read only on MCP tool invocation.
-- Canonical real paths enforce the workspace boundary and block symlink escapes.
-- Active files outside the workspace are withheld.
-- Text reads are bounded and require valid UTF-8.
-- Search is bounded and skips dependency/generated directories.
-- No write/edit/shell/Git/test-execution MCP tools exist.
-
-### Cloud relay
-
-- VS Code connects outbound over authenticated WSS.
-- Device secrets are capability tokens; only their hash is stored in the control plane.
-- OAuth uses PKCE S256 and short-lived single-use authorization codes.
-- Refresh tokens rotate and cannot broaden the granted scope.
-- OAuth/device endpoints are body-bounded and rate-limited.
-- `/mcp` requires a bearer token for the exact MCP resource.
-- Multiple sockets may exist for one device, with a strict per-device cap.
-- MCP requests route to the most recently focused VS Code window.
-- In-flight responses are correlated to the exact selected socket.
-- Relay request/response bodies and headers are bounded.
-
-See `SECURITY.md` for the detailed threat model.
 
 ## Development and QA
 
@@ -158,18 +174,23 @@ npm run qa
 npm run package:release
 ```
 
-CI runs deterministic install, dependency audit, TypeScript checks/builds, read-only bridge/Worker regression tests, a real `workerd` OAuth/MCP relay smoke, focused multi-window routing smoke, VSIX packaging, and a packaged-VSIX inspection that fails if an EXE or the removed localhost bridge endpoint is present.
+CI validates the TypeScript builds, workspace/MCP behavior, Worker runtime, hosted product/authorization UI, multi-window routing, VSIX packaging, and a clean-profile VSIX install/uninstall cycle.
 
 The release artifact upload contains only the VSIX.
 
 ## Repository layout
 
 ```text
-vscode-extension/   complete end-user VSIX client
-cloud-worker/       hosted OAuth + MCP device relay
-bridge/             legacy v0.1/v0.2 agent source retained for regression/migration reference; not packaged
-.github/workflows/  deterministic QA and VSIX-only release gate
+vscode-extension/   complete end-user VSIX client + setup/UI resource
+cloud-worker/       hosted OAuth + MCP device relay + product pages
+docs/OPERATIONS.md  deployment and ChatGPT connection runbook
+bridge/             legacy agent source retained for regression/migration reference; not packaged
+.github/workflows/  QA, packaging, and Worker deployment workflows
 ```
+
+## Security boundary
+
+The v0.2 capability boundary remains unchanged: the six MCP tools are read-only, local workspace access is constrained to open VS Code workspace roots, and there is no shell/write/Git/test-execution tool. See [`SECURITY.md`](SECURITY.md) for the detailed threat model.
 
 ## License
 
