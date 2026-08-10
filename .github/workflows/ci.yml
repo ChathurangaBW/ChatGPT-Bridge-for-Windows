@@ -70,7 +70,18 @@ jobs:
             }
           }
       - name: Package single VSIX release
-        run: npm run package:release
+        shell: pwsh
+        run: |
+          Remove-Item ".\artifacts" -Recurse -Force -ErrorAction SilentlyContinue
+          npm run package:release
+          if ($LASTEXITCODE -ne 0) { throw "VSIX release packaging failed." }
+          $files = @(Get-ChildItem ".\artifacts" -File -Recurse)
+          if ($files.Count -ne 1) {
+            throw "Release output must contain exactly one file; found $($files.Count)."
+          }
+          if ($files[0].Name -ne "chatgpt-bridge-vscode-0.2.0.vsix") {
+            throw "Unexpected release artifact: $($files[0].FullName)"
+          }
       - name: Smoke packaged VSIX
         shell: pwsh
         run: |
@@ -86,17 +97,44 @@ jobs:
           Expand-Archive -Path $zip -DestinationPath $temp -Force
 
           $packagePath = Join-Path $temp "extension\package.json"
+          $manifestPath = Join-Path $temp "extension.vsixmanifest"
           $bundlePath = Join-Path $temp "extension\dist\extension.js"
-          if (-not (Test-Path $packagePath)) { throw "VSIX package.json is missing." }
-          if (-not (Test-Path $bundlePath)) { throw "VSIX extension bundle is missing." }
+          $readmePath = Join-Path $temp "extension\readme.md"
+          foreach ($required in @($packagePath, $manifestPath, $bundlePath, $readmePath)) {
+            if (-not (Test-Path $required)) { throw "Required VSIX entry is missing: $required" }
+          }
+
           $package = Get-Content $packagePath -Raw | ConvertFrom-Json
           if ($package.version -ne "0.2.0") { throw "Unexpected VSIX package version: $($package.version)" }
+          if ($package.publisher -ne "chathurangabw") { throw "Unexpected VSIX publisher: $($package.publisher)" }
+          if ($package.main -ne "./dist/extension.js") { throw "Unexpected VSIX entry point: $($package.main)" }
           if ($package.description -match "local ChatGPT Bridge service") { throw "VSIX still advertises the removed local companion service." }
+
           $bundle = Get-Content $bundlePath -Raw
           if ($bundle -notmatch "lucky-heart-f5b9\.chatgpt-bridge\.workers\.dev") { throw "VSIX bundle does not contain the production cloud relay endpoint." }
-          if ($bundle -match "ws://127\.0\.0\.1:47321") { throw "VSIX bundle still contains the removed localhost WebSocket bridge endpoint." }
+          if ($bundle -notmatch "wss:") { throw "VSIX bundle does not contain secure WebSocket relay handling." }
+
           $exe = Get-ChildItem $temp -Recurse -Filter "*.exe" -ErrorAction SilentlyContinue
           if ($exe) { throw "VSIX unexpectedly contains an executable." }
+
+          $textFiles = Get-ChildItem $temp -Recurse -File | Where-Object { $_.Extension -in @(".js", ".json", ".md", ".xml", ".vsixmanifest") }
+          $forbiddenPatterns = @(
+            "ChatGPTBridge\.exe",
+            "ws://127\.0\.0\.1",
+            "http://127\.0\.0\.1",
+            "localhost:47321",
+            "localhost:47322",
+            "OPENAI_API_KEY",
+            "CLOUDFLARE_API_TOKEN",
+            "-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----",
+            "sk-[A-Za-z0-9_-]{20,}"
+          )
+          foreach ($file in $textFiles) {
+            $text = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
+            foreach ($pattern in $forbiddenPatterns) {
+              if ($text -match $pattern) { throw "Forbidden release marker '$pattern' found in $($file.FullName)." }
+            }
+          }
       - name: Export VSIX release artifact
         uses: actions/upload-artifact@v7
         with:
