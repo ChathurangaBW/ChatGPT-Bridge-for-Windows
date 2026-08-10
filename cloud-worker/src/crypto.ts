@@ -36,11 +36,6 @@ export async function sha256(input: string): Promise<string> {
   return base64Url(new Uint8Array(digest));
 }
 
-export async function verifyPkceS256(verifier: string, expectedChallenge: string): Promise<boolean> {
-  if (verifier.length < 43 || verifier.length > 128) return false;
-  return (await sha256(verifier)) === expectedChallenge;
-}
-
 export function secureEqualText(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
   let diff = 0;
@@ -48,4 +43,9 @@ export function secureEqualText(a: string, b: string): boolean {
     diff |= a.charCodeAt(index) ^ b.charCodeAt(index);
   }
   return diff === 0;
+}
+
+export async function verifyPkceS256(verifier: string, expectedChallenge: string): Promise<boolean> {
+  if (verifier.length < 43 || verifier.length > 128) return false;
+  return secureEqualText(await sha256(verifier), expectedChallenge);
 }
