@@ -18,8 +18,10 @@ test("PKCE S256 verification accepts the matching verifier only", async () => {
   assert.equal(await verifyPkceS256("short", challenge), false);
 });
 
-test("OAuth scopes always include bridge read and retain offline access when requested", () => {
+test("OAuth scopes include bridge read, retain offline access, and preserve unsupported scopes for rejection", () => {
   assert.equal(normalizeScope(undefined), MCP_SCOPE);
   assert.equal(normalizeScope(OFFLINE_SCOPE), `${MCP_SCOPE} ${OFFLINE_SCOPE}`);
   assert.equal(hasRequiredScope(normalizeScope(OFFLINE_SCOPE)), true);
+  assert.equal(normalizeScope(`${OFFLINE_SCOPE} admin`), `${MCP_SCOPE} ${OFFLINE_SCOPE} admin`);
+  assert.equal(hasRequiredScope(normalizeScope(`${OFFLINE_SCOPE} admin`)), false);
 });
