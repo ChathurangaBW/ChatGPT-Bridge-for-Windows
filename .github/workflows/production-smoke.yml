@@ -1,0 +1,24 @@
+name: Production Worker Smoke
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  production-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Probe production Worker end-to-end
+        env:
+          BRIDGE_SMOKE_URL: https://lucky-heart-f5b9.chatgpt-bridge.workers.dev
+        run: node cloud-worker/test/runtime-smoke.mjs
