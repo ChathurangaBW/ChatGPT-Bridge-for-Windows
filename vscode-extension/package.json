@@ -2,7 +2,7 @@
   "name": "chatgpt-bridge-vscode",
   "displayName": "ChatGPT Bridge for Windows",
   "description": "Publishes live VS Code editor context to the local ChatGPT Bridge service.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "chathurangabw",
   "private": true,
   "repository": {
@@ -42,7 +42,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit && esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node20 --external:vscode --outfile=dist/extension.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "package:vsix": "vsce package --no-dependencies --allow-missing-repository --out ../artifacts/chatgpt-bridge-vscode-0.1.0.vsix"
+    "package:vsix": "vsce package --no-dependencies --allow-missing-repository --out ../artifacts/chatgpt-bridge-vscode-0.2.0.vsix"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
