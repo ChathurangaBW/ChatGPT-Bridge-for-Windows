@@ -4,12 +4,14 @@ import { bridgeSecretPath, ensureBridgeSecret } from "./secret.js";
 import { EditorStateStore } from "./stateStore.js";
 import { startEditorSocketServer } from "./editorSocketServer.js";
 import { startMcpHttpServer } from "./mcpServer.js";
+import { startCloudRelayClient, type CloudRelayClient } from "./cloudClient.js";
 
 const { wsPort, mcpPort } = bridgePorts();
 const token = await ensureBridgeSecret();
 const store = new EditorStateStore();
 const websocket = startEditorSocketServer({ port: wsPort, token, store });
 const { server: httpServer, closeMcp } = startMcpHttpServer({ port: mcpPort, store });
+let cloudRelay: CloudRelayClient | null = null;
 
 function closeWebSocketServer(): Promise<void> {
   for (const client of websocket.clients) client.terminate();
@@ -26,6 +28,7 @@ let shuttingDown = false;
 async function shutdown(): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
+  cloudRelay?.stop();
   await Promise.allSettled([closeWebSocketServer(), closeHttpServer(), closeMcp()]);
 }
 
@@ -45,10 +48,11 @@ function handleFatalServerError(label: string, error: Error): void {
 websocket.on("error", (error) => handleFatalServerError("VS Code WebSocket", error));
 httpServer.on("error", (error) => handleFatalServerError("MCP HTTP", error));
 
-console.log("ChatGPT Bridge for Windows v0.1.0");
-console.log(`VS Code socket: ws://127.0.0.1:${wsPort}`);
-console.log(`MCP endpoint:    http://127.0.0.1:${mcpPort}/mcp`);
-console.log(`Pairing secret:  ${bridgeSecretPath()}`);
+console.log("ChatGPT Bridge for Windows v0.2.0");
+console.log(`VS Code socket:   ws://127.0.0.1:${wsPort}`);
+console.log(`Local MCP:        http://127.0.0.1:${mcpPort}/mcp`);
+console.log(`Pairing secret:   ${bridgeSecretPath()}`);
+cloudRelay = await startCloudRelayClient(mcpPort);
 
 function handleSignal(): void {
   void shutdown().finally(() => process.exit(0));
