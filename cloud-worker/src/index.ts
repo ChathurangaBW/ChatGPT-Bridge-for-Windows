@@ -22,6 +22,7 @@ interface AuthorizeParams {
 }
 
 const MAX_OAUTH_BODY_BYTES = 64 * 1024;
+const MCP_POST_ACCEPT = "application/json, text/event-stream";
 const SAFE_REQUEST_HEADERS = ["content-type", "accept", "mcp-protocol-version", "mcp-session-id", "last-event-id"];
 const SAFE_RESPONSE_HEADERS = ["content-type", "mcp-session-id", "cache-control"];
 
@@ -372,6 +373,12 @@ async function handleMcp(request: Request, origin: string, env: Env): Promise<Re
   for (const name of SAFE_REQUEST_HEADERS) {
     const value = request.headers.get(name);
     if (value && value.length <= 4096) headers[name] = value;
+  }
+  if (request.method === "POST") {
+    // The local MCP transport follows the spec strictly and requires both media types.
+    // Normalize the trusted internal hop so ChatGPT tool discovery remains compatible
+    // even when the public caller sends a narrower HTTP Accept value.
+    headers.accept = MCP_POST_ACCEPT;
   }
   const relayRequest: CloudMcpRequest = {
     type: "mcp_request",
