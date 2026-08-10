@@ -1,6 +1,14 @@
 import * as vscode from "vscode";
 import type { CloudStatusDetails } from "./cloudClient.js";
 
+const HTML_ESCAPES: Record<string, string> = {
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#39;",
+};
+
 export interface SetupPanelActions {
   copyPairingCode(): Promise<void>;
   openPairingPage(): Promise<void>;
@@ -48,7 +56,6 @@ export class SetupPanel implements vscode.Disposable {
       vscode.ViewColumn.One,
       { enableScripts: true, retainContextWhenHidden: true },
     );
-    this.panel.iconPath = new vscode.ThemeIcon("plug");
 
     this.panel.webview.onDidReceiveMessage(
       async (message: { type?: unknown }) => {
@@ -147,9 +154,9 @@ export class SetupPanel implements vscode.Disposable {
 <script nonce="${nonce}">
 const vscode = acquireVsCodeApi();
 document.addEventListener('click', (event) => {
-  const target = event.target instanceof HTMLElement ? event.target.closest('button[data-action]') : null;
-  if (!target) return;
-  vscode.postMessage({ type: target.dataset.action });
+  const element = event.target instanceof HTMLElement ? event.target.closest('button[data-action]') : null;
+  if (!(element instanceof HTMLButtonElement)) return;
+  vscode.postMessage({ type: element.dataset.action });
 });
 </script>
 </body>
@@ -158,11 +165,5 @@ document.addEventListener('click', (event) => {
 }
 
 function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (character) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-  })[character] ?? character);
+  return value.replace(/[&<>"']/g, (character) => HTML_ESCAPES[character] ?? character);
 }
