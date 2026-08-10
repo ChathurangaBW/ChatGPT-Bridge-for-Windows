@@ -55,7 +55,8 @@ export class DeviceRelay extends DurableObject<Env> {
     }
 
     const pair = new WebSocketPair();
-    const [client, server] = Object.values(pair);
+    const client = pair[0];
+    const server = pair[1];
     this.ctx.acceptWebSocket(server);
     const attachment: SocketAttachment = { deviceId, connectedAt: Date.now() };
     server.serializeAttachment(attachment);
