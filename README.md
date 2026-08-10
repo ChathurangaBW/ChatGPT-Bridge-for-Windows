@@ -1,55 +1,113 @@
 # ChatGPT Bridge for Windows
 
-Windows-first bridge that exposes **live VS Code editor context** to normal ChatGPT conversations through the Model Context Protocol (MCP), without using Codex as the user-facing workflow.
+Windows-first bridge that exposes **live VS Code editor context** to normal ChatGPT conversations through MCP, without using Codex as the user-facing workflow.
 
-> **v0.1 is deliberately read-only.** It can expose editor/workspace context, diagnostics, safe file reads, and literal workspace search. It cannot edit files, execute commands, mutate Git, or run tests on behalf of ChatGPT.
+> **v0.2 remains deliberately read-only.** It exposes workspace/editor context, diagnostics, safe UTF-8 file reads, and bounded literal search. It does not edit files, run commands, mutate Git, or execute tests on behalf of ChatGPT.
 
-## Architecture
+## v0.2 architecture
 
 ```text
 VS Code
-  │  authenticated loopback WebSocket
-  │  active file / unsaved buffer / selection / diagnostics
+  │ authenticated loopback WebSocket
   ▼
 ChatGPTBridge.exe
-  ├─ editor state
+  ├─ live editor state
   ├─ safe workspace reads/search
-  └─ Streamable HTTP MCP: http://127.0.0.1:47322/mcp
-        │
-        ▼
-OpenAI Secure MCP Tunnel
-        │ outbound HTTPS
-        ▼
-ChatGPT custom MCP app
+  ├─ localhost MCP: http://127.0.0.1:47322/mcp
+  └─ outbound authenticated WebSocket
+             │
+             ▼
+Cloudflare Worker + Durable Objects
+https://lucky-heart-f5b9.chatgpt-bridge.workers.dev
+  ├─ OAuth discovery / registration / PKCE
+  ├─ short-lived PC pairing codes
+  ├─ bearer-protected /mcp
+  └─ per-device WebSocket relay
+             │
+             ▼
+           ChatGPT
 ```
 
-The VS Code extension provides editor-only state that a filesystem-only MCP server cannot see, including unsaved buffers, the current selection, and VS Code diagnostics. The bridge re-checks the canonical workspace boundary before active-editor or selection data is returned over MCP; an editor outside the open workspace is withheld.
+The normal user does **not** enter an OpenAI API key, tunnel ID, ngrok URL, or router/firewall rule. `ChatGPTBridge.exe` makes the connection outbound and stores its own device credential locally. ChatGPT authenticates to the public MCP endpoint through OAuth and the user authorizes a PC with the short pairing code displayed by the bridge.
 
 ## MCP tools
 
 The bridge exposes six read-only tools:
 
-- `get_workspace` — current VS Code workspace folders and connection state; an active path outside the canonical workspace is hidden.
-- `get_active_editor` — active workspace-file metadata and current editor buffer, including unsaved changes.
-- `get_selection` — current selection and selected text for the active workspace file.
-- `get_diagnostics` — diagnostics currently reported by VS Code for open workspace files.
-- `read_file` — safely read an existing UTF-8 text file inside an open workspace root.
-- `search_workspace` — bounded literal text search across UTF-8 workspace files without shell execution.
+- `get_workspace`
+- `get_active_editor`
+- `get_selection`
+- `get_diagnostics`
+- `read_file`
+- `search_workspace`
 
-## Install the packaged Windows build
+Active editor/selection data is returned only when the active file resolves canonically inside a currently open VS Code workspace root.
 
-A successful CI run produces the artifact **`chatgpt-bridge-windows-0.1.0`** containing:
+## Public endpoint
+
+The configured Worker is:
+
+```text
+https://lucky-heart-f5b9.chatgpt-bridge.workers.dev
+```
+
+Important routes:
+
+```text
+GET  /health
+POST /device/register
+GET  /device/status
+POST /device/pairing
+WS   /device/connect
+GET  /.well-known/oauth-protected-resource/mcp
+GET  /.well-known/oauth-authorization-server
+POST /register
+GET  /authorize
+POST /authorize
+POST /token
+POST /mcp
+```
+
+The MCP endpoint to register in ChatGPT is:
+
+```text
+https://lucky-heart-f5b9.chatgpt-bridge.workers.dev/mcp
+```
+
+## Deploy the Cloudflare Worker
+
+Deployment is an operator/developer step. End users of the packaged bridge do not need a Cloudflare account.
+
+From the repository root:
+
+```powershell
+npm ci
+npx wrangler login
+npm run deploy:cloud
+```
+
+`wrangler login` uses Cloudflare's browser authorization flow. No OpenAI API key is involved.
+
+Verify deployment:
+
+```powershell
+Invoke-RestMethod https://lucky-heart-f5b9.chatgpt-bridge.workers.dev/health
+```
+
+Expected service version: `0.2.0`.
+
+## Install on Windows
+
+A successful CI run produces artifact **`chatgpt-bridge-windows-0.2.0`** containing:
 
 ```text
 ChatGPTBridge.exe
-chatgpt-bridge-vscode-0.1.0.vsix
+chatgpt-bridge-vscode-0.2.0.vsix
 ```
 
-`ChatGPTBridge.exe` contains its Node runtime, so Node.js is not required merely to run the packaged bridge. The current development build is not code-signed, so Windows may display normal warnings for an unsigned downloaded executable. Verify that the binary came from this repository's successful GitHub Actions run before launching it.
+`ChatGPTBridge.exe` contains its Node runtime. The current build is unsigned, so Windows may display a SmartScreen warning.
 
 ### 1. Start the bridge
-
-Run:
 
 ```powershell
 .\ChatGPTBridge.exe
@@ -57,85 +115,91 @@ Run:
 
 Defaults:
 
-- VS Code WebSocket: `ws://127.0.0.1:47321`
-- MCP endpoint: `http://127.0.0.1:47322/mcp`
-- Health endpoint: `http://127.0.0.1:47322/health`
+```text
+VS Code socket: ws://127.0.0.1:47321
+Local MCP:      http://127.0.0.1:47322/mcp
+Health:         http://127.0.0.1:47322/health
+Cloud gateway:  https://lucky-heart-f5b9.chatgpt-bridge.workers.dev
+```
 
-The bridge creates a random local pairing secret at:
+On first start the agent registers a device and prints a short pairing code similar to:
 
 ```text
-%LOCALAPPDATA%\ChatGPTBridge\bridge-token
+Cloud pairing:    ABCD-EFGH-JKLM
+Pairing page:     https://lucky-heart-f5b9.chatgpt-bridge.workers.dev/pair/ABCD-EFGH-JKLM
 ```
+
+Cloud device credentials are stored under the current Windows user's `%LOCALAPPDATA%\ChatGPTBridge` directory. They are separate from the local VS Code pairing secret.
 
 Optional environment variables:
 
 ```text
 BRIDGE_WS_PORT=47321
 BRIDGE_MCP_PORT=47322
+BRIDGE_CLOUD_URL=https://lucky-heart-f5b9.chatgpt-bridge.workers.dev
+BRIDGE_CLOUD_DISABLED=true
 ```
 
-The two ports must be different and must be integers from 1024 through 65535. If a configured listener cannot bind—for example because another bridge instance already owns the port—the process exits non-zero instead of remaining partially available. If `BRIDGE_WS_PORT` is changed, set the VS Code setting `chatgptBridge.wsPort` to the same number and reload the extension.
+`BRIDGE_CLOUD_DISABLED=true` is for local/offline diagnostics and CI.
 
 ### 2. Install the VS Code extension
 
-In VS Code use **Extensions → … → Install from VSIX…** and choose:
-
-```text
-chatgpt-bridge-vscode-0.1.0.vsix
-```
-
-Or, if the `code` CLI is available:
-
 ```powershell
-code --install-extension .\chatgpt-bridge-vscode-0.1.0.vsix
+code --install-extension .\chatgpt-bridge-vscode-0.2.0.vsix
 ```
 
-The status bar shows **ChatGPT Bridge** when connected. Run **ChatGPT Bridge: Show Status** from the Command Palette to inspect the current connection state and endpoint.
+Or use **VS Code → Extensions → … → Install from VSIX…**.
 
-Multiple VS Code windows may connect at the same time. Each authenticated window keeps its own snapshot; MCP uses the most recently updated connected window and falls back only to another still-connected window's own snapshot if that window closes.
-
-### 3. Verify the local bridge
+Restart VS Code, open the project folder, then run **ChatGPT Bridge: Show Status** from the Command Palette. The local health check should report `vscodeConnected: true`:
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:47322/health
 ```
 
-With at least one authenticated VS Code window connected, `vscodeConnected` should be `true`.
+### 3. Connect the ChatGPT app
 
-## Connect the local MCP server to ChatGPT
+Create/configure the custom MCP app in ChatGPT with:
 
-ChatGPT does not directly reach a private/localhost MCP server through the cloud. OpenAI provides **Secure MCP Tunnel** for this case.
-
-Official resources:
-
-- https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt
-- https://github.com/openai/tunnel-client
-- https://developers.openai.com/api/docs/guides/secure-mcp-tunnels
-
-Create/obtain a tunnel ID and runtime API key using OpenAI's supported tunnel setup, then configure the tunnel client to forward to this bridge:
-
-```powershell
-$env:CONTROL_PLANE_API_KEY="sk-..."
-$env:CONTROL_PLANE_TUNNEL_ID="tunnel_0123456789abcdef0123456789abcdef"
-$env:MCP_SERVER_URL="http://127.0.0.1:47322/mcp"
-
-tunnel-client run --log.level=info --log.format=struct-text
+```text
+https://lucky-heart-f5b9.chatgpt-bridge.workers.dev/mcp
 ```
 
-The official tunnel client keeps the MCP server private and forwards requests from OpenAI products to the configured local Streamable HTTP endpoint over an outbound HTTPS tunnel. Keep the tunnel client running while ChatGPT needs the connector.
+The endpoint returns OAuth protected-resource metadata. During **Connect**, ChatGPT is redirected to the bridge authorization page. Enter the current pairing code shown by `ChatGPTBridge.exe` and approve the PC. OAuth uses authorization-code + PKCE; access and refresh tokens are issued by the Worker and scoped to `bridge:read`.
 
-Then attach the provisioned tunnel in the supported ChatGPT connector/app settings for your organization and scan the MCP tools.
+If the ChatGPT app is recreated or authorization needs to be repeated later, the running Windows agent continually maintains a fresh short-lived pairing code. You do not delete the device credential or enter an OpenAI API key.
 
-## Development from source
+## Local security boundary
 
-### Requirements
+- Local VS Code and MCP listeners bind only to `127.0.0.1`.
+- VS Code → bridge requires a generated per-user secret.
+- Editor snapshots are schema-validated and bounded.
+- Multiple VS Code windows have isolated snapshots.
+- Active-file/selection data is rechecked against canonical workspace roots at the MCP boundary.
+- Safe file reads/search reject symlink escapes, invalid UTF-8, binary-looking data, generated/dependency directories, and oversized files.
+- No arbitrary shell, write/edit, Git mutation, or test-execution MCP tool exists.
 
-- Windows 10/11 for the release/smoke target
-- Node.js 22+ for the complete development and packaging toolchain
+## Cloud security boundary
+
+- Windows → cloud is outbound WSS only.
+- Device secrets are random capabilities; only a hash is stored in the Worker control plane.
+- OAuth uses PKCE S256 and short-lived, single-use authorization codes.
+- Pairing codes are short-lived and generation-bound so a stale OAuth callback cannot authorize after a newer pairing rotation.
+- Refresh tokens rotate and cannot broaden the originally granted scope.
+- OAuth/device registration endpoints are rate-limited and body-bounded.
+- `/mcp` requires a valid bearer token for the exact MCP resource.
+- Each device has an isolated Durable Object relay and only one active bridge socket is retained.
+- Relay request/response bodies and forwarded headers are bounded/allowlisted.
+
+See [SECURITY.md](SECURITY.md) for the detailed threat boundary.
+
+## Development
+
+Requirements:
+
+- Node.js 22+
 - npm
 - VS Code
-
-Clone and verify:
+- Cloudflare account only when deploying the Worker
 
 ```powershell
 git clone https://github.com/ChathurangaBW/ChatGPT-Bridge-for-Windows.git
@@ -144,94 +208,41 @@ npm ci
 npm run qa
 ```
 
-Run the development bridge:
+Useful commands:
 
 ```powershell
 npm run dev:bridge
-```
-
-Build the VS Code extension and use **F5** from the `vscode-extension` folder to launch an Extension Development Host.
-
-### Build distributables
-
-```powershell
+npm run dev:cloud
 npm run package:release
+npm run deploy:cloud
 ```
 
-This produces:
+Repository layout:
 
 ```text
-artifacts\ChatGPTBridge.exe
-artifacts\chatgpt-bridge-vscode-0.1.0.vsix
+bridge/             Windows agent + localhost MCP/security boundary
+vscode-extension/   live VS Code context publisher
+cloud-worker/       OAuth control plane + per-device relay
+.github/workflows/  Windows deterministic QA/release gate
 ```
 
-Packaging tool versions are pinned in the npm scripts. CI runs on Windows, audits repository dependencies, executes behavioral tests, builds the TypeScript projects, packages both artifacts, launches the packaged EXE, probes its health endpoint, verifies occupied-port failure, and verifies malformed port configuration fails closed.
+## QA gate
 
-## Security model
+CI uses the committed npm lockfile and read-only repository permissions. It runs:
 
-Version 0.1 follows a least-privilege design:
+- `npm ci`
+- blocking `npm audit --audit-level=moderate`
+- TypeScript checks and builds for all workspaces
+- bridge and Worker unit tests
+- Worker dry-run packaging
+- real local `workerd` runtime smoke covering device registration, authenticated WebSocket relay, OAuth dynamic client registration, PKCE token exchange, bearer `/mcp`, MCP response relay, and refresh-token rotation
+- VSIX packaging
+- standalone Windows EXE packaging
+- packaged EXE health/startup smoke
+- occupied-port and malformed-port failure checks
 
-- both local listeners bind only to `127.0.0.1`;
-- VS Code ↔ bridge WebSocket requires a generated pairing secret;
-- inbound editor snapshots are schema-validated and size-bounded;
-- snapshots are isolated by authenticated VS Code connection to prevent stale cross-window context;
-- MCP Host/Origin values and request-body size are validated at the local HTTP boundary;
-- active-editor and selection data are returned only when the active file resolves inside a canonical current workspace root;
-- editor-dependent MCP calls fail when all VS Code windows disconnect instead of returning stale editor state;
-- `read_file` resolves canonical paths and rejects paths outside current workspace roots;
-- ambiguous relative paths in multi-root workspaces are rejected;
-- workspace reads/search accept only bounded UTF-8 text and skip symlinks, common generated/dependency directories, binary-looking files, invalid UTF-8 files, and oversized files;
-- no arbitrary shell/terminal tool exists;
-- no write/edit tool exists.
-
-See [SECURITY.md](SECURITY.md) for the threat boundary and rules for future mutating tools.
-
-## Repository layout
-
-```text
-bridge/
-  src/                 local bridge, MCP server, security boundary
-  test/                config/state/filesystem/WebSocket/MCP integration tests
-
-vscode-extension/
-  src/                 live VS Code context publisher
-
-.github/workflows/
-  ci.yml               Windows QA, audit, package, executable smoke test
-```
-
-## Current release QA
-
-The automated suite covers:
-
-- authenticated and rejected VS Code WebSocket pairing;
-- schema validation of live editor snapshots;
-- immediate stale-state removal after protocol violations/disconnects;
-- multiple VS Code windows and connected-snapshot fallback;
-- workspace canonical-path containment and multi-root ambiguity;
-- active-editor/selection privacy for files outside canonical workspace roots;
-- binary, invalid-UTF-8, and oversized-file rejection;
-- bounded workspace search;
-- explicit beyond-EOF `read_file` validation;
-- strict bridge port configuration validation;
-- MCP health endpoint;
-- MCP initialize/tool discovery/tool call flow;
-- hostile Host rejection;
-- TypeScript typechecking/build;
-- dependency audit;
-- VSIX packaging;
-- packaged Windows EXE startup/health smoke test;
-- packaged EXE occupied-port and malformed-config failure smoke tests.
-
-A CI pass validates the repository-controlled portions of the application. The final ChatGPT ↔ Secure MCP Tunnel connection still depends on the user's OpenAI organization, tunnel permissions/API key, and ChatGPT plan/workspace configuration and therefore is not exercised with repository secrets in public CI.
-
-## Roadmap after v0.1
-
-1. Windows code signing and a conventional installer/tray experience.
-2. Opt-in, reviewable VS Code `WorkspaceEdit` operations.
-3. Narrowly allowlisted Git/test tools with explicit permission UX.
-4. Additional telemetry-free local diagnostics and connection troubleshooting.
+The only step not reproducible in public CI is deploying into the repository owner's Cloudflare account and then exercising the actual ChatGPT product UI against that deployed account.
 
 ## License
 
-No license has been selected yet. Add one before accepting external contributions or redistributing builds outside your intended use.
+No license has been selected yet. Add one before accepting external contributions or redistributing builds outside the intended use.
