@@ -12,41 +12,41 @@ Version 0.2 is read-only. It exposes editor context, diagnostics, safe file read
 - test/build execution;
 - access outside currently open VS Code workspace roots.
 
-## Local transport
+## End-user client
 
-The VS Code WebSocket and MCP HTTP listeners bind only to `127.0.0.1`.
+The VSIX is the complete end-user client. There is no companion executable, localhost WebSocket, localhost MCP HTTP server, or user-configurable local port.
 
-VS Code authenticates with a random per-user secret stored under `%LOCALAPPDATA%\ChatGPTBridge\bridge-token`. The bridge rejects unauthenticated clients, malformed/oversized snapshots, non-loopback HTTP Host/Origin values, and oversized MCP bodies.
+The extension connects outbound to the hosted relay over authenticated WSS. The device secret is stored with VS Code `SecretStorage`, which is the VS Code API intended for encrypted sensitive extension state. Non-secret device metadata is stored in extension global state.
 
-Listener startup is fail-fast. Invalid, identical, or occupied listener ports terminate the bridge rather than leaving a partially running process.
-
-Loopback binding and the local pairing secret do **not** protect against malicious software already running as the same Windows user. Treat that Windows user account as part of the trusted computing base.
+For upgrades from the prior EXE-based v0.2 design, the extension may import the existing cloud device credential once from `%LOCALAPPDATA%\ChatGPTBridge\cloud-device.json`. The legacy file is not required for new installations and the EXE is not used after migration.
 
 ## Editor and filesystem privacy
 
-Editor state is bounded in the VS Code extension and revalidated at the MCP boundary:
+Workspace data is gathered on demand when an MCP tool is invoked; the extension does not continuously publish editor snapshots.
 
-- each authenticated VS Code window has an isolated snapshot;
-- stale snapshots are removed on protocol violations/disconnects;
 - active editor and selection data is withheld unless the active path resolves canonically inside a current workspace root;
 - file reads resolve canonical real paths and reject workspace escapes/symlink traversal;
 - ambiguous relative paths in multi-root workspaces are rejected;
-- reads/search accept bounded UTF-8 text only and reject/skip binary-looking, invalid UTF-8, oversized, generated/dependency, and symlinked entries;
-- workspace search has file-count and result caps.
+- reads require bounded valid UTF-8 text and reject binary-looking or oversized files;
+- workspace search is literal and has file/result caps;
+- search skips common dependency/generated directories;
+- diagnostics are filtered to canonical paths inside the open workspace.
 
 ## Cloud relay boundary
 
-The public Worker is the only internet-facing component. The local MCP server is never bound publicly.
+The public Worker is the only internet-facing component.
 
 ### Device identity
 
-- A new Windows agent receives a random device ID and high-entropy device secret from the Worker.
+- A new VS Code installation receives a random device ID and high-entropy device secret from the Worker.
 - Only a SHA-256 hash of the device secret is persisted by the control plane.
-- The Windows agent stores the device credential under the current user's `%LOCALAPPDATA%\ChatGPTBridge` directory.
+- The device secret is stored through VS Code `SecretStorage`.
 - Device registration is rate-limited.
-- The device connects outbound over authenticated WSS; no inbound Windows firewall/router rule is required.
+- VS Code connects outbound over authenticated WSS; no inbound Windows firewall/router rule is required.
 - Each device is mapped to a separate Durable Object relay.
-- A newer device WebSocket replaces the previous socket for that device.
+- Multiple VS Code windows may connect for one paired device, with a strict socket cap.
+- Focus signals select the most recently focused VS Code window for new MCP calls.
+- In-flight MCP calls are bound to the exact socket that received them so another/stale window cannot satisfy them.
 
 ### Pairing and OAuth
 
@@ -54,22 +54,20 @@ The public Worker is the only internet-facing component. The local MCP server is
 - Rotating a pairing code increments a device pairing generation.
 - OAuth authorization codes capture that generation and are rejected at token exchange if a newer pairing attempt replaced them.
 - OAuth authorization uses authorization-code + PKCE S256.
-- Authorization codes are short-lived and single-use.
-- PKCE comparisons use constant-time text comparison after hashing.
+- Authorization codes are short-lived and atomically single-use.
 - Access tokens are scoped to the exact `/mcp` resource and `bridge:read` scope.
-- Refresh tokens rotate on use and requested refresh scopes may only narrow, never broaden, the original grant.
-- OAuth dynamic client registration is rate-limited and validates redirect URI scheme/credentials/fragments.
+- Refresh tokens rotate atomically on use and cannot broaden the originally granted scope.
+- OAuth registration validates redirect URI constraints and is rate-limited.
 - OAuth/form/registration request bodies are explicitly bounded.
 
 ### MCP relay
 
 - `/mcp` requires a valid bearer token for the exact public MCP resource.
-- The Worker forwards only allowlisted MCP request headers.
-- The Windows agent independently allowlists cloud-provided request headers before sending to localhost.
-- Request and response bodies are size-bounded on both cloud and Windows sides.
-- The local MCP handler uses JSON response mode; the relay does not expose arbitrary open-ended local HTTP proxying.
-- Relay requests have finite timeouts and are rejected if the paired Windows agent is offline.
-- The cloud protocol carries only MCP request/response envelopes; it does not provide a generic remote shell or arbitrary URL fetch capability.
+- MCP 2026 routing headers are validated/synthesized at the gateway and rechecked inside the VS Code client.
+- Request and response bodies and forwarded headers are bounded.
+- The cloud protocol carries only MCP request/response and focus envelopes; it does not provide a generic remote shell or arbitrary URL fetch capability.
+- Relay requests have finite timeouts and are rejected if no paired VS Code window is online.
+- The six exposed MCP tools are read-only and execute inside the selected VS Code extension host.
 
 ## Dependency and CI policy
 
@@ -82,15 +80,17 @@ The permanent Windows CI gate uses:
 - TypeScript checks/builds;
 - behavioral unit tests;
 - Cloudflare Worker dry-run packaging;
-- a real local `workerd` OAuth/device/MCP relay smoke test;
-- VSIX and standalone EXE packaging;
-- packaged EXE health, occupied-port, and malformed-config smoke checks.
+- real local `workerd` OAuth/device/MCP relay smoke tests;
+- focused multi-window relay routing smoke;
+- VSIX packaging;
+- packaged VSIX inspection that fails if an EXE or removed localhost bridge endpoint is present;
+- a release artifact containing only the VSIX.
 
 Do not waive moderate-or-higher dependency findings without a documented reason and compensating controls.
 
 ## Cloudflare account boundary
 
-Deploying the Worker requires authorization to the repository owner's Cloudflare account. Those Cloudflare credentials are an operator/deployment concern and are not embedded in the Windows executable, VSIX, repository, OAuth tokens, or device credential.
+Deploying the Worker requires authorization to the repository owner's Cloudflare account. Those Cloudflare credentials are an operator/deployment concern and are not embedded in the VSIX, OAuth tokens, or device credential.
 
 The deployed public endpoint must remain HTTPS and must not bypass the OAuth/device controls implemented here.
 
