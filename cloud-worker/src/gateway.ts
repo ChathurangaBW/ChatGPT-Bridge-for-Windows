@@ -75,11 +75,7 @@ function parseJsonRpcHints(body: string): JsonRpcHints {
   try {
     const parsed = JSON.parse(body) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { id: null };
-    const value = parsed as {
-      id?: unknown;
-      method?: unknown;
-      params?: unknown;
-    };
+    const value = parsed as { id?: unknown; method?: unknown; params?: unknown };
     const params = value.params && typeof value.params === "object" && !Array.isArray(value.params)
       ? (value.params as Record<string, unknown>)
       : null;
@@ -106,14 +102,7 @@ function parseJsonRpcHints(body: string): JsonRpcHints {
 }
 
 function headerMismatch(id: unknown, message: string): Response {
-  return json(
-    {
-      jsonrpc: "2.0",
-      id: id ?? null,
-      error: { code: -32020, message },
-    },
-    400,
-  );
+  return json({ jsonrpc: "2.0", id: id ?? null, error: { code: -32020, message } }, 400);
 }
 
 function isSafeAsciiHeaderValue(value: string): boolean {
@@ -122,11 +111,7 @@ function isSafeAsciiHeaderValue(value: string): boolean {
 
 function isAllowedRequestHeader(name: string): boolean {
   if (STATIC_REQUEST_HEADERS.has(name)) return true;
-  return (
-    name.startsWith("mcp-param-") &&
-    name.length > "mcp-param-".length &&
-    name.length <= MAX_HEADER_NAME_CHARS
-  );
+  return name.startsWith("mcp-param-") && name.length > "mcp-param-".length && name.length <= MAX_HEADER_NAME_CHARS;
 }
 
 function collectRelayHeaders(request: Request, hints: JsonRpcHints): Record<string, string> | Response {
@@ -218,12 +203,29 @@ async function handleMcp(request: Request, origin: string, env: Env): Promise<Re
   }
 }
 
+function withIssuer(response: Response, origin: string): Response {
+  if (response.status < 300 || response.status >= 400) return response;
+  const location = response.headers.get("location");
+  if (!location) return response;
+  try {
+    const redirect = new URL(location);
+    redirect.searchParams.set("iss", origin);
+    const headers = new Headers(response.headers);
+    headers.set("location", redirect.toString());
+    return new Response(response.body, { status: response.status, headers });
+  } catch {
+    return response;
+  }
+}
+
 const baseFetch = baseHandler.fetch as (request: Request, env: Env) => Promise<Response>;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/mcp") return handleMcp(request, url.origin, env);
-    return baseFetch(request, env);
+    const response = await baseFetch(request, env);
+    if (url.pathname === "/authorize") return withIssuer(response, url.origin);
+    return response;
   },
 } satisfies ExportedHandler<Env>;
