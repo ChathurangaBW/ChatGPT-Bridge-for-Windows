@@ -15,7 +15,14 @@ import {
   hasRequiredScope,
   normalizeScope,
 } from "./protocol.js";
-import { normalizePairingCode, randomId, randomPairingCode, randomToken, sha256, verifyPkceS256 } from "./crypto.js";
+import {
+  normalizePairingCode,
+  randomId,
+  randomPairingCode,
+  randomToken,
+  secureEqualText,
+  sha256,
+} from "./crypto.js";
 
 interface Env {}
 
@@ -135,7 +142,7 @@ export class ControlPlane extends DurableObject<Env> {
   async verifyDevice(deviceId: string, deviceSecret: string): Promise<boolean> {
     const record = await this.ctx.storage.get<DeviceRecord>(deviceKey(deviceId));
     if (!record) return false;
-    return (await sha256(deviceSecret)) === record.secretHash;
+    return secureEqualText(await sha256(deviceSecret), record.secretHash);
   }
 
   async getDeviceStatus(deviceId: string, deviceSecret: string): Promise<DeviceStatus> {
@@ -238,47 +245,54 @@ export class ControlPlane extends DurableObject<Env> {
   }
 
   async exchangeAuthorizationCode(input: ExchangeCodeInput): Promise<IssuedTokens> {
-    const hash = await sha256(input.code);
-    const key = authCodeKey(hash);
-    const record = await this.ctx.storage.get<AuthorizationCodeRecord>(key);
-    if (!record) throw new Error("Invalid authorization code.");
-    if (record.expiresAt <= Date.now()) {
-      await this.ctx.storage.delete(key);
-      throw new Error("Authorization code expired.");
-    }
-    if (record.clientId !== input.clientId || record.redirectUri !== input.redirectUri || record.resource !== input.resource) {
-      throw new Error("Authorization code context mismatch.");
-    }
-    if (!(await verifyPkceS256(input.codeVerifier, record.codeChallenge))) throw new Error("PKCE verification failed.");
+    if (input.codeVerifier.length < 43 || input.codeVerifier.length > 128) throw new Error("PKCE verification failed.");
+    const key = authCodeKey(await sha256(input.code));
+    const verifierChallenge = await sha256(input.codeVerifier);
+    const record = await this.ctx.storage.transaction(async (txn) => {
+      const current = await txn.get<AuthorizationCodeRecord>(key);
+      if (!current) throw new Error("Invalid authorization code.");
+      if (current.expiresAt <= Date.now()) {
+        await txn.delete(key);
+        throw new Error("Authorization code expired.");
+      }
+      if (current.clientId !== input.clientId || current.redirectUri !== input.redirectUri || current.resource !== input.resource) {
+        throw new Error("Authorization code context mismatch.");
+      }
+      if (!secureEqualText(verifierChallenge, current.codeChallenge)) throw new Error("PKCE verification failed.");
+      await txn.delete(key);
+      return current;
+    });
 
     const device = await this.ctx.storage.get<DeviceRecord>(deviceKey(record.deviceId));
     if (!device) throw new Error("Paired device no longer exists.");
     if (device.pairingGeneration !== record.pairingGeneration) {
-      await this.ctx.storage.delete(key);
       throw new Error("Authorization code was replaced by a newer pairing attempt.");
     }
 
-    await this.ctx.storage.delete(key);
     device.pairedAt = Date.now();
     await this.ctx.storage.put(deviceKey(device.deviceId), device);
     return this.issueTokens(record.deviceId, record.clientId, record.scope, record.resource);
   }
 
   async refresh(input: RefreshInput): Promise<IssuedTokens> {
-    const hash = await sha256(input.refreshToken);
-    const key = refreshKey(hash);
-    const record = await this.ctx.storage.get<TokenRecord>(key);
-    if (!record) throw new Error("Invalid refresh token.");
-    if (record.expiresAt <= Date.now()) {
-      await this.ctx.storage.delete(key);
-      throw new Error("Refresh token expired.");
-    }
-    if (record.clientId !== input.clientId || record.resource !== input.resource) throw new Error("Refresh token context mismatch.");
-    const scope = input.scope ? normalizeScope(input.scope) : record.scope;
-    if (!hasRequiredScope(scope) || !scopeIsSubset(scope, record.scope)) throw new Error("Refresh request attempted to broaden the granted scope.");
+    const key = refreshKey(await sha256(input.refreshToken));
+    const consumed = await this.ctx.storage.transaction(async (txn) => {
+      const record = await txn.get<TokenRecord>(key);
+      if (!record) throw new Error("Invalid refresh token.");
+      if (record.expiresAt <= Date.now()) {
+        await txn.delete(key);
+        throw new Error("Refresh token expired.");
+      }
+      if (record.clientId !== input.clientId || record.resource !== input.resource) throw new Error("Refresh token context mismatch.");
+      const scope = input.scope ? normalizeScope(input.scope) : record.scope;
+      if (!hasRequiredScope(scope) || !scopeIsSubset(scope, record.scope)) {
+        throw new Error("Refresh request attempted to broaden the granted scope.");
+      }
+      await txn.delete(key);
+      return { record, scope };
+    });
 
-    await this.ctx.storage.delete(key);
-    return this.issueTokens(record.deviceId, record.clientId, scope, record.resource);
+    return this.issueTokens(consumed.record.deviceId, consumed.record.clientId, consumed.scope, consumed.record.resource);
   }
 
   async introspectAccessToken(accessToken: string, resource: string): Promise<TokenRecord | null> {
@@ -313,27 +327,35 @@ export class ControlPlane extends DurableObject<Env> {
 
   private async issueTokens(deviceId: string, clientId: string, scope: string, resource: string): Promise<IssuedTokens> {
     const accessToken = randomToken();
+    const accessHash = await sha256(accessToken);
+    const now = Date.now();
     const access: TokenRecord = {
       deviceId,
       clientId,
       scope,
       resource,
-      expiresAt: Date.now() + ACCESS_TOKEN_TTL_MS,
+      expiresAt: now + ACCESS_TOKEN_TTL_MS,
     };
-    await this.ctx.storage.put(accessKey(await sha256(accessToken)), access);
 
     let refreshToken: string | undefined;
+    let refreshHash: string | undefined;
+    let refresh: TokenRecord | undefined;
     if (scope.split(/\s+/).includes(OFFLINE_SCOPE)) {
       refreshToken = randomToken();
-      const refresh: TokenRecord = {
+      refreshHash = await sha256(refreshToken);
+      refresh = {
         deviceId,
         clientId,
         scope,
         resource,
-        expiresAt: Date.now() + REFRESH_TOKEN_TTL_MS,
+        expiresAt: now + REFRESH_TOKEN_TTL_MS,
       };
-      await this.ctx.storage.put(refreshKey(await sha256(refreshToken)), refresh);
     }
+
+    await this.ctx.storage.transaction(async (txn) => {
+      await txn.put(accessKey(accessHash), access);
+      if (refreshHash && refresh) await txn.put(refreshKey(refreshHash), refresh);
+    });
 
     return {
       accessToken,
@@ -346,9 +368,11 @@ export class ControlPlane extends DurableObject<Env> {
   private async consumeHourlyRate(kind: string, ip: string, max: number): Promise<void> {
     const currentHour = Math.floor(Date.now() / 3_600_000);
     const key = await rateKey(kind, ip);
-    const existing = await this.ctx.storage.get<RegistrationRate>(key);
-    const count = existing?.hour === currentHour ? existing.count : 0;
-    if (count >= max) throw new Error("Too many registration requests from this address. Try again later.");
-    await this.ctx.storage.put(key, { hour: currentHour, count: count + 1 } satisfies RegistrationRate);
+    await this.ctx.storage.transaction(async (txn) => {
+      const existing = await txn.get<RegistrationRate>(key);
+      const count = existing?.hour === currentHour ? existing.count : 0;
+      if (count >= max) throw new Error("Too many registration requests from this address. Try again later.");
+      await txn.put(key, { hour: currentHour, count: count + 1 } satisfies RegistrationRate);
+    });
   }
 }
