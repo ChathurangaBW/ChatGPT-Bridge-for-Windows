@@ -146,36 +146,55 @@ export class ControlPlane extends DurableObject<Env> {
   }
 
   async getDeviceStatus(deviceId: string, deviceSecret: string): Promise<DeviceStatus> {
-    if (!(await this.verifyDevice(deviceId, deviceSecret))) throw new Error("Invalid device credential.");
-    const record = await this.ctx.storage.get<DeviceRecord>(deviceKey(deviceId));
-    if (!record) throw new Error("Unknown device.");
+    const suppliedHash = await sha256(deviceSecret);
+    return this.ctx.storage.transaction(async (txn) => {
+      const record = await txn.get<DeviceRecord>(deviceKey(deviceId));
+      if (!record || !secureEqualText(suppliedHash, record.secretHash)) throw new Error("Invalid device credential.");
 
-    if (record.currentPairingCode && (!record.pairingExpiresAt || record.pairingExpiresAt <= Date.now())) {
-      await this.ctx.storage.delete(pairKey(record.currentPairingCode));
-      delete record.currentPairingCode;
-      delete record.pairingExpiresAt;
-      await this.ctx.storage.put(deviceKey(deviceId), record);
-    }
+      if (record.currentPairingCode && (!record.pairingExpiresAt || record.pairingExpiresAt <= Date.now())) {
+        await txn.delete(pairKey(record.currentPairingCode));
+        delete record.currentPairingCode;
+        delete record.pairingExpiresAt;
+        await txn.put(deviceKey(deviceId), record);
+      }
 
-    return {
-      paired: Boolean(record.pairedAt),
-      ...(record.currentPairingCode ? { pairingCode: record.currentPairingCode } : {}),
-      ...(record.pairingExpiresAt ? { pairingExpiresAt: record.pairingExpiresAt } : {}),
-    };
+      return {
+        paired: Boolean(record.pairedAt),
+        ...(record.currentPairingCode ? { pairingCode: record.currentPairingCode } : {}),
+        ...(record.pairingExpiresAt ? { pairingExpiresAt: record.pairingExpiresAt } : {}),
+      };
+    });
   }
 
   async rotatePairing(deviceId: string, deviceSecret: string): Promise<DeviceStatus> {
-    if (!(await this.verifyDevice(deviceId, deviceSecret))) throw new Error("Invalid device credential.");
-    const record = await this.ctx.storage.get<DeviceRecord>(deviceKey(deviceId));
-    if (!record) throw new Error("Unknown device.");
+    const suppliedHash = await sha256(deviceSecret);
+    const now = Date.now();
+    return this.ctx.storage.transaction(async (txn) => {
+      const record = await txn.get<DeviceRecord>(deviceKey(deviceId));
+      if (!record || !secureEqualText(suppliedHash, record.secretHash)) throw new Error("Invalid device credential.");
 
-    if (record.currentPairingCode) await this.ctx.storage.delete(pairKey(record.currentPairingCode));
-    record.pairingGeneration += 1;
-    const pairing = await this.createPairing(deviceId, record.pairingGeneration, Date.now());
-    record.currentPairingCode = pairing.pairingCode;
-    record.pairingExpiresAt = pairing.pairingExpiresAt;
-    await this.ctx.storage.put(deviceKey(deviceId), record);
-    return { paired: Boolean(record.pairedAt), ...pairing };
+      if (record.currentPairingCode) await txn.delete(pairKey(record.currentPairingCode));
+      record.pairingGeneration += 1;
+
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const pairingCode = randomPairingCode();
+        const key = pairKey(pairingCode);
+        const existing = await txn.get<PairingRecord>(key);
+        if (existing && existing.expiresAt > now) continue;
+
+        const pairingExpiresAt = now + PAIRING_TTL_MS;
+        await txn.put(key, {
+          deviceId,
+          pairingGeneration: record.pairingGeneration,
+          expiresAt: pairingExpiresAt,
+        } satisfies PairingRecord);
+        record.currentPairingCode = pairingCode;
+        record.pairingExpiresAt = pairingExpiresAt;
+        await txn.put(deviceKey(deviceId), record);
+        return { paired: Boolean(record.pairedAt), pairingCode, pairingExpiresAt };
+      }
+      throw new Error("Unable to allocate a unique pairing code.");
+    });
   }
 
   async registerClient(input: RegisterClientInput, ip = "unknown"): Promise<OAuthClientRecord> {
@@ -248,6 +267,7 @@ export class ControlPlane extends DurableObject<Env> {
     if (input.codeVerifier.length < 43 || input.codeVerifier.length > 128) throw new Error("PKCE verification failed.");
     const key = authCodeKey(await sha256(input.code));
     const verifierChallenge = await sha256(input.codeVerifier);
+
     const record = await this.ctx.storage.transaction(async (txn) => {
       const current = await txn.get<AuthorizationCodeRecord>(key);
       if (!current) throw new Error("Invalid authorization code.");
@@ -259,18 +279,19 @@ export class ControlPlane extends DurableObject<Env> {
         throw new Error("Authorization code context mismatch.");
       }
       if (!secureEqualText(verifierChallenge, current.codeChallenge)) throw new Error("PKCE verification failed.");
+
+      const device = await txn.get<DeviceRecord>(deviceKey(current.deviceId));
+      if (!device) throw new Error("Paired device no longer exists.");
+      if (device.pairingGeneration !== current.pairingGeneration) {
+        throw new Error("Authorization code was replaced by a newer pairing attempt.");
+      }
+
       await txn.delete(key);
+      device.pairedAt = Date.now();
+      await txn.put(deviceKey(device.deviceId), device);
       return current;
     });
 
-    const device = await this.ctx.storage.get<DeviceRecord>(deviceKey(record.deviceId));
-    if (!device) throw new Error("Paired device no longer exists.");
-    if (device.pairingGeneration !== record.pairingGeneration) {
-      throw new Error("Authorization code was replaced by a newer pairing attempt.");
-    }
-
-    device.pairedAt = Date.now();
-    await this.ctx.storage.put(deviceKey(device.deviceId), device);
     return this.issueTokens(record.deviceId, record.clientId, record.scope, record.resource);
   }
 
