@@ -7,9 +7,12 @@ import {
 } from "./cloudCredentials.js";
 
 const MAX_RELAY_BODY_BYTES = 6 * 1024 * 1024;
+const REQUEST_HEADERS = new Set(["content-type", "accept", "mcp-protocol-version", "mcp-session-id", "last-event-id"]);
 const RESPONSE_HEADERS = ["content-type", "mcp-session-id", "cache-control"];
-const PAIRING_REFRESH_INTERVAL_MS = 60_000;
-const PAIRING_REFRESH_EARLY_MS = 60_000;
+const PAIRING_REFRESH_INTERVAL_MS = 15_000;
+const PAIRING_REFRESH_EARLY_MS = 0;
+const CLOUD_HTTP_TIMEOUT_MS = 15_000;
+const LOCAL_MCP_TIMEOUT_MS = 25_000;
 
 interface RegistrationResponse {
   deviceId: string;
@@ -55,6 +58,7 @@ function isMcpRequest(value: unknown): value is CloudMcpRequest {
     item.type === "mcp_request" &&
     typeof item.requestId === "string" &&
     item.requestId.length > 0 &&
+    item.requestId.length <= 200 &&
     (item.method === "POST" || item.method === "DELETE") &&
     typeof item.body === "string" &&
     item.headers !== null &&
@@ -63,7 +67,10 @@ function isMcpRequest(value: unknown): value is CloudMcpRequest {
 }
 
 async function jsonRequest<T>(url: string, init: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
+  const response = await fetch(url, {
+    ...init,
+    signal: init.signal ?? AbortSignal.timeout(CLOUD_HTTP_TIMEOUT_MS),
+  });
   const text = await response.text();
   let body: unknown = null;
   try {
@@ -169,7 +176,10 @@ async function relayToLocalMcp(request: CloudMcpRequest, mcpPort: number): Promi
 
   const headers = new Headers();
   for (const [name, value] of Object.entries(request.headers)) {
-    if (typeof value === "string" && value.length <= 4096) headers.set(name, value);
+    const normalized = name.toLowerCase();
+    if (REQUEST_HEADERS.has(normalized) && typeof value === "string" && value.length <= 4096) {
+      headers.set(normalized, value);
+    }
   }
   if (request.method === "POST" && !headers.has("content-type")) headers.set("content-type", "application/json");
 
@@ -178,6 +188,7 @@ async function relayToLocalMcp(request: CloudMcpRequest, mcpPort: number): Promi
       method: request.method,
       headers,
       ...(request.method === "POST" ? { body: request.body } : {}),
+      signal: AbortSignal.timeout(LOCAL_MCP_TIMEOUT_MS),
     });
     const body = await response.text();
     if (bodyBytes(body) > MAX_RELAY_BODY_BYTES) {
