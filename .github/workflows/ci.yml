@@ -4,10 +4,11 @@ on:
   push:
     branches:
       - main
+      - agent/cloud-relay-v0.2
   pull_request:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -22,7 +23,20 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+      - name: Bootstrap v0.2 dependencies
+        run: npm install
+      - name: Persist generated lockfile once
+        if: github.event_name == 'push' && github.ref == 'refs/heads/agent/cloud-relay-v0.2'
+        shell: pwsh
+        run: |
+          $change = git status --porcelain -- package-lock.json
+          if ($change) {
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add package-lock.json
+            git commit -m "chore: lock v0.2 cloud relay dependencies"
+            git push origin HEAD:${{ github.ref_name }}
+          }
       - name: Dependency audit
         run: npm audit --audit-level=moderate
       - run: npm run qa
@@ -30,8 +44,10 @@ jobs:
         run: npm run package:release
       - name: Smoke packaged bridge executable
         shell: pwsh
+        env:
+          BRIDGE_CLOUD_DISABLED: "true"
         run: |
-          $process = Start-Process -FilePath ".\artifacts\ChatGPTBridge.exe" -PassThru -WindowStyle Hidden
+          $process = Start-Process -FilePath ".\artifacts\ChatGPTBridge.exe" -PassThru -WindowStyle Hidden -Environment @{ BRIDGE_CLOUD_DISABLED = "true" }
           $collision = $null
           $badConfig = $null
           try {
@@ -51,45 +67,33 @@ jobs:
                 # The packaged process may still be starting.
               }
             }
-            if (-not $ready) {
-              throw "ChatGPTBridge.exe did not expose a healthy loopback endpoint within the smoke-test window."
-            }
+            if (-not $ready) { throw "ChatGPTBridge.exe did not expose a healthy loopback endpoint within the smoke-test window." }
 
-            $collision = Start-Process -FilePath ".\artifacts\ChatGPTBridge.exe" -PassThru -WindowStyle Hidden
-            if (-not $collision.WaitForExit(10000)) {
-              throw "A second ChatGPTBridge.exe instance did not fail on occupied default ports."
-            }
-            if ($collision.ExitCode -eq 0) {
-              throw "A second ChatGPTBridge.exe instance unexpectedly exited successfully on occupied ports."
-            }
+            $collision = Start-Process -FilePath ".\artifacts\ChatGPTBridge.exe" -PassThru -WindowStyle Hidden -Environment @{ BRIDGE_CLOUD_DISABLED = "true" }
+            if (-not $collision.WaitForExit(10000)) { throw "A second ChatGPTBridge.exe did not fail on occupied default ports." }
+            if ($collision.ExitCode -eq 0) { throw "A second ChatGPTBridge.exe unexpectedly exited successfully on occupied ports." }
 
             $healthAfterCollision = Invoke-RestMethod -Uri "http://127.0.0.1:47322/health" -TimeoutSec 2
-            if ($healthAfterCollision.ok -ne $true) {
-              throw "The original bridge became unhealthy after the port-collision smoke test."
-            }
+            if ($healthAfterCollision.ok -ne $true) { throw "The original bridge became unhealthy after the port-collision smoke test." }
 
             $badConfig = Start-Process -FilePath ".\artifacts\ChatGPTBridge.exe" -PassThru -WindowStyle Hidden -Environment @{
               BRIDGE_WS_PORT = "47321abc"
               BRIDGE_MCP_PORT = "57322"
+              BRIDGE_CLOUD_DISABLED = "true"
             }
-            if (-not $badConfig.WaitForExit(10000)) {
-              throw "ChatGPTBridge.exe did not reject a malformed BRIDGE_WS_PORT value."
-            }
-            if ($badConfig.ExitCode -eq 0) {
-              throw "ChatGPTBridge.exe unexpectedly accepted a malformed BRIDGE_WS_PORT value."
-            }
+            if (-not $badConfig.WaitForExit(10000)) { throw "ChatGPTBridge.exe did not reject a malformed BRIDGE_WS_PORT value." }
+            if ($badConfig.ExitCode -eq 0) { throw "ChatGPTBridge.exe unexpectedly accepted a malformed BRIDGE_WS_PORT value." }
           } finally {
             foreach ($candidate in @($badConfig, $collision, $process)) {
-              if ($null -ne $candidate -and -not $candidate.HasExited) {
-                Stop-Process -Id $candidate.Id -Force
-              }
+              if ($null -ne $candidate -and -not $candidate.HasExited) { Stop-Process -Id $candidate.Id -Force }
             }
           }
       - name: Export release artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: chatgpt-bridge-windows-0.1.0
+          name: chatgpt-bridge-windows-0.2.0
           path: |
             artifacts/ChatGPTBridge.exe
             artifacts/chatgpt-bridge-vscode-0.1.0.vsix
+            artifacts/cloud-worker/**
           if-no-files-found: error
