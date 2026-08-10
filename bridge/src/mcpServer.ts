@@ -43,7 +43,7 @@ function hiddenEditorResult(snapshot: EditorSnapshot) {
 }
 
 function buildMcpServer(store: EditorStateStore): McpServer {
-  const server = new McpServer({ name: "chatgpt-bridge-windows", version: "0.1.0" });
+  const server = new McpServer({ name: "chatgpt-bridge-windows", version: "0.2.0" });
   const readOnly = { readOnlyHint: true, destructiveHint: false, openWorldHint: false } as const;
 
   server.registerTool(
