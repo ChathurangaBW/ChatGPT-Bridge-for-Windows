@@ -102,6 +102,8 @@ export const TOOLS: ToolDefinition[] = [
   },
 ];
 
+const TOOL_NAMES = new Set(TOOLS.map((tool) => tool.name));
+
 export type ToolCaller = (name: string, args: Record<string, unknown>) => Promise<Record<string, unknown>>;
 
 function objectParams(value: unknown): Record<string, unknown> {
@@ -116,11 +118,7 @@ function rpcError(id: unknown, code: number, message: string): string {
   return JSON.stringify({ jsonrpc: "2.0", id: id ?? null, error: { code, message } });
 }
 
-function response(
-  request: CloudMcpRequest,
-  status: number,
-  body: string,
-): CloudMcpResponse {
+function response(request: CloudMcpRequest, status: number, body: string): CloudMcpResponse {
   return {
     type: "mcp_response",
     requestId: request.requestId,
@@ -192,6 +190,7 @@ export async function handleMcpRequestCore(request: CloudMcpRequest, callTool: T
     case "tools/call": {
       const name = typeof params.name === "string" ? params.name : "";
       if (!name) return response(request, 400, rpcError(parsed.id, -32602, "Tool name is required."));
+      if (!TOOL_NAMES.has(name)) return response(request, 404, rpcError(parsed.id, -32602, `Unknown tool: ${name}`));
       if (protocolVersion === PROTOCOL_2026) {
         const routedName = request.headers["mcp-name"];
         if (routedName !== name) {
