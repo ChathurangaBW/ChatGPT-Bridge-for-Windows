@@ -5,6 +5,7 @@ import { prepareChatGptReauthentication } from "./reauth.js";
 import { SetupPanel, type SetupPanelActions } from "./setupPanel.js";
 
 const SETUP_SHOWN_KEY = "chatgptBridge.setupShown.v2";
+const PAIRING_CODE_KEY = "chatgptBridge.cloud.pairingCode";
 const CHATGPT_URL = "https://chatgpt.com/";
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -42,7 +43,15 @@ export function activate(context: vscode.ExtensionContext): void {
   const client = new CloudExtensionClient(context, updateStatus);
 
   const actions: SetupPanelActions = {
-    copyPairingCode: () => client.copyPairingCode(),
+    copyPairingCode: async () => {
+      const code = context.globalState.get<string>(PAIRING_CODE_KEY) ?? latest.pairingCode;
+      if (!code) {
+        await client.copyPairingCode();
+        return;
+      }
+      await vscode.env.clipboard.writeText(code);
+      void vscode.window.showInformationMessage("ChatGPT Bridge pairing code copied.");
+    },
     copyMcpUrl: async () => {
       await vscode.env.clipboard.writeText(BRIDGE_MCP_URL);
     },
@@ -52,7 +61,8 @@ export function activate(context: vscode.ExtensionContext): void {
     },
     runDiagnostics: async () => {
       output.appendLine(`[${new Date().toISOString()}] running hosted Worker/OAuth/MCP connection check`);
-      const result = await runBridgeDiagnostics(fetch, BRIDGE_ORIGIN, latest.pairingCode);
+      const pairingCode = context.globalState.get<string>(PAIRING_CODE_KEY) ?? latest.pairingCode;
+      const result = await runBridgeDiagnostics(fetch, BRIDGE_ORIGIN, pairingCode);
       for (const check of result.checks) {
         output.appendLine(`  ${check.state.toUpperCase()} ${check.label}: ${check.detail}`);
       }
@@ -98,7 +108,7 @@ export function activate(context: vscode.ExtensionContext): void {
         void vscode.window.showInformationMessage(result.ok ? "ChatGPT Bridge endpoint checks passed." : "ChatGPT Bridge endpoint checks found a problem. Open Setup for details.");
       }
     }),
-    vscode.commands.registerCommand("chatgptBridge.copyPairingCode", () => client.copyPairingCode()),
+    vscode.commands.registerCommand("chatgptBridge.copyPairingCode", () => actions.copyPairingCode()),
     vscode.commands.registerCommand("chatgptBridge.openPairingPage", () => client.openPairingPage()),
     vscode.commands.registerCommand("chatgptBridge.runConnectionCheck", async () => {
       const result = await actions.runDiagnostics();
