@@ -38,6 +38,14 @@
       {
         "command": "chatgptBridge.openPairingPage",
         "title": "ChatGPT Bridge: Open Pairing Page"
+      },
+      {
+        "command": "chatgptBridge.runConnectionCheck",
+        "title": "ChatGPT Bridge: Run Connection Check"
+      },
+      {
+        "command": "chatgptBridge.prepareReauthentication",
+        "title": "ChatGPT Bridge: Prepare ChatGPT Reauthentication"
       }
     ]
   },
