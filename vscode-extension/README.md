@@ -4,22 +4,45 @@ ChatGPT Bridge runs entirely inside VS Code. The **VSIX is the only end-user pac
 
 The extension opens an outbound authenticated WebSocket to the hosted ChatGPT Bridge relay and handles MCP requests inside the currently focused VS Code window.
 
-## First-run setup
+## First-run setup and connection doctor
 
 After installation/reload, the extension automatically opens the **ChatGPT Bridge** setup panel once.
 
-The panel shows the complete connection flow:
+The panel separates the real connection layers instead of treating an old device pairing as proof that the current ChatGPT app session is healthy:
 
-1. Extension installed.
-2. Hosted relay connection state.
-3. ChatGPT pairing/authorization state.
+1. VS Code client / relay connection.
+2. Hosted Worker + OAuth + MCP configuration check.
+3. ChatGPT authorization or reauthentication.
+4. Final ChatGPT account action (Reauthenticate / Refresh actions) when required.
 
-When pairing is required it displays the short pairing code and provides:
+The **Run connection check** action validates:
+
+- hosted Worker `/health`
+- OAuth protected-resource discovery
+- OAuth authorization-server metadata, PKCE, refresh-token and `offline_access` support
+- a real authorization redirect using the current pairing code, including the expected OAuth issuer marker
+- unauthenticated `/mcp` returning the expected OAuth challenge
+
+This lets the extension identify a stale or incompatible Worker deployment before the user retries ChatGPT authorization.
+
+When ChatGPT reports **Reauthentication required**, **No app actions available yet**, or **Error refreshing actions**:
+
+1. Open **ChatGPT Bridge: Open Setup**.
+2. Run **Run connection check** and resolve any failed Bridge-side check.
+3. Click **Prepare reauthentication**. The extension rotates a fresh pairing code and copies it to the clipboard.
+4. In the existing ChatGPT Bridge app entry, click **Reauthenticate**.
+5. Paste the fresh pairing code on the Bridge OAuth page.
+6. Back in ChatGPT, click **Refresh actions**.
+
+OpenAI currently performs custom MCP app creation, OAuth approval, Reauthenticate, and Scan/Refresh actions inside the signed-in ChatGPT UI. The VSIX prepares and validates every Bridge-side value but does not attempt to impersonate or modify the user's ChatGPT account.
+
+Other setup actions include:
 
 - **Copy pairing code**
+- **Copy MCP URL**
 - **Open pairing page**
 - **Open ChatGPT**
-- **Retry connection** when the relay is unavailable
+- **Retry relay connection**
 
 The ChatGPT Bridge status-bar item remains available after first run. Click it at any time to reopen setup.
 
@@ -29,6 +52,8 @@ Commands:
 - **ChatGPT Bridge: Show Status**
 - **ChatGPT Bridge: Copy Pairing Code**
 - **ChatGPT Bridge: Open Pairing Page**
+- **ChatGPT Bridge: Run Connection Check**
+- **ChatGPT Bridge: Prepare ChatGPT Reauthentication**
 
 ## ChatGPT UI
 
