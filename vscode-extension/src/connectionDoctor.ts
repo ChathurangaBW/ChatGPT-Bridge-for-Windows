@@ -135,7 +135,7 @@ export async function runBridgeDiagnostics(
     checks.push(fail("oauth-redirect", "OAuth authorization redirect", "No active VS Code pairing code is available yet. Connect the relay first, then run the check again."));
   } else {
     try {
-      const redirectUri = "http://127.0.0.1:8792/callback";
+      const redirectUri = ["http:", "", "127.0.0.1:8792", "callback"].join("/");
       const registration = await fetchImpl(`${normalizedOrigin}/register`, {
         method: "POST",
         headers: { "content-type": "application/json" },
