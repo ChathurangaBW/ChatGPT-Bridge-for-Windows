@@ -9,17 +9,12 @@ function jsonResponse(body: unknown, status = 200, headers?: HeadersInit): Respo
   });
 }
 
-function healthyFetch(options?: { staleWorker?: boolean; anonymousMcp?: boolean }): typeof fetch {
-  return (async (input: string | URL | Request) => {
+function healthyFetch(options?: { missingIssuer?: boolean; anonymousMcp?: boolean }): typeof fetch {
+  return (async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const path = new URL(url).pathname;
     if (path === "/health") {
-      return jsonResponse({
-        ok: true,
-        service: "chatgpt-bridge-cloud",
-        version: "0.2.0",
-        capabilities: options?.staleWorker ? [] : ["oauth-issuer", "mcp-routing-headers", "vsix-direct-relay"],
-      });
+      return jsonResponse({ ok: true, service: "chatgpt-bridge-cloud", version: "0.2.0" });
     }
     if (path === "/.well-known/oauth-protected-resource/mcp") {
       return jsonResponse({
@@ -40,6 +35,17 @@ function healthyFetch(options?: { staleWorker?: boolean; anonymousMcp?: boolean 
         token_endpoint_auth_methods_supported: ["none"],
       });
     }
+    if (path === "/register") {
+      return jsonResponse({ client_id: "client_doctor" }, 201);
+    }
+    if (path === "/authorize") {
+      const body = init?.body instanceof URLSearchParams ? init.body : new URLSearchParams(String(init?.body ?? ""));
+      const callback = new URL("http://127.0.0.1:8792/callback");
+      callback.searchParams.set("code", "doctor-code");
+      callback.searchParams.set("state", body.get("state") ?? "");
+      if (!options?.missingIssuer) callback.searchParams.set("iss", BRIDGE_ORIGIN);
+      return new Response(null, { status: 302, headers: { location: callback.toString() } });
+    }
     if (path === "/mcp") {
       if (options?.anonymousMcp) return jsonResponse({ tools: [] }, 200);
       return jsonResponse(
@@ -53,22 +59,22 @@ function healthyFetch(options?: { staleWorker?: boolean; anonymousMcp?: boolean 
 }
 
 test("connection doctor passes a current Bridge runtime", async () => {
-  const result = await runBridgeDiagnostics(healthyFetch());
+  const result = await runBridgeDiagnostics(healthyFetch(), BRIDGE_ORIGIN, "ABCD-EFGH-JKLM");
   assert.equal(result.ok, true);
-  assert.equal(result.checks.length, 4);
-  assert.deepEqual(result.checks.map((check) => check.state), ["pass", "pass", "pass", "pass"]);
+  assert.equal(result.checks.length, 5);
+  assert.deepEqual(result.checks.map((check) => check.state), ["pass", "pass", "pass", "pass", "pass"]);
 });
 
-test("connection doctor detects a stale Worker deployment", async () => {
-  const result = await runBridgeDiagnostics(healthyFetch({ staleWorker: true }));
+test("connection doctor detects the stale OAuth redirect seen in deployment", async () => {
+  const result = await runBridgeDiagnostics(healthyFetch({ missingIssuer: true }), BRIDGE_ORIGIN, "ABCD-EFGH-JKLM");
   assert.equal(result.ok, false);
-  const worker = result.checks.find((check) => check.id === "worker");
-  assert.equal(worker?.state, "fail");
-  assert.match(worker?.detail ?? "", /older Bridge runtime/i);
+  const redirect = result.checks.find((check) => check.id === "oauth-redirect");
+  assert.equal(redirect?.state, "fail");
+  assert.match(redirect?.detail ?? "", /Worker update required/i);
 });
 
 test("connection doctor rejects anonymously exposed MCP tools", async () => {
-  const result = await runBridgeDiagnostics(healthyFetch({ anonymousMcp: true }));
+  const result = await runBridgeDiagnostics(healthyFetch({ anonymousMcp: true }), BRIDGE_ORIGIN, "ABCD-EFGH-JKLM");
   assert.equal(result.ok, false);
   const mcp = result.checks.find((check) => check.id === "mcp-challenge");
   assert.equal(mcp?.state, "fail");
