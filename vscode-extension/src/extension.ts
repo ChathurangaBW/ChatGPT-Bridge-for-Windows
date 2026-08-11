@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { CloudExtensionClient, type CloudStatusDetails } from "./cloudClient.js";
-import { BRIDGE_MCP_URL, runBridgeDiagnostics } from "./connectionDoctor.js";
+import { BRIDGE_MCP_URL, BRIDGE_ORIGIN, runBridgeDiagnostics } from "./connectionDoctor.js";
 import { prepareChatGptReauthentication } from "./reauth.js";
 import { SetupPanel, type SetupPanelActions } from "./setupPanel.js";
 
@@ -52,7 +52,7 @@ export function activate(context: vscode.ExtensionContext): void {
     },
     runDiagnostics: async () => {
       output.appendLine(`[${new Date().toISOString()}] running hosted Worker/OAuth/MCP connection check`);
-      const result = await runBridgeDiagnostics();
+      const result = await runBridgeDiagnostics(fetch, BRIDGE_ORIGIN, latest.pairingCode);
       for (const check of result.checks) {
         output.appendLine(`  ${check.state.toUpperCase()} ${check.label}: ${check.detail}`);
       }
